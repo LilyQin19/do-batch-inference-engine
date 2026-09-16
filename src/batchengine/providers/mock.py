@@ -24,6 +24,12 @@ class MockProviderConfig:
     p_500: float = 0.0
     p_400: float = 0.0
     p_timeout: float = 0.0
+    # Probability of raising a plain RuntimeError -- not a modeled
+    # ProviderTransportError or HTTP status, but an arbitrary bug in a
+    # provider implementation. Exists to prove the worker pool survives an
+    # exception type it doesn't explicitly know about (see
+    # tests/integration/test_conservation.py and docs/decisions.md).
+    p_unexpected_exception: float = 0.0
     latency_mean: float = 0.05
     latency_jitter: float = 0.02
     # If set, calls beyond this rate in a rolling 60s window get a real 429
@@ -97,6 +103,9 @@ class MockProvider:
                     ),
                 )
             self._request_timestamps.append(now)
+
+        if self._rng.random() < self._cfg.p_unexpected_exception:
+            raise RuntimeError("mock: simulated unexpected provider bug")
 
         if self._rng.random() < self._cfg.p_timeout:
             raise ProviderTransportError("mock: simulated timeout")

@@ -84,3 +84,51 @@ def test_circuit_breaker_half_open_reopens_on_probe_failure() -> None:
     breaker.record(is_failure=True)
     assert breaker.state == "open"
     assert not breaker.allow_request()
+
+
+def test_half_open_probe_that_never_reports_does_not_deadlock() -> None:
+    """A probe that goes out (allow_request() -> True during half-open) but
+    whose caller never calls record() -- e.g. it crashed, or hit one of
+    process_item's abort/cancel early returns before reaching the provider
+    call -- must not wedge the breaker open-forever. Without probe_timeout_s,
+    `_probe_in_flight` stays True permanently and allow_request() returns
+    False on every subsequent call, hanging the job (§ defect 2).
+    """
+    clock = {"t": 0.0}
+    breaker = CircuitBreaker(
+        window=20, threshold=0.5, cooldown_s=30.0, probe_timeout_s=10.0, clock=lambda: clock["t"]
+    )
+    for _ in range(15):
+        breaker.record(is_failure=True)
+    assert breaker.state == "open"
+
+    clock["t"] = 30.0
+    assert breaker.allow_request()  # issues the probe; _probe_in_flight = True
+    assert breaker.state == "half_open"
+    assert not breaker.allow_request()  # still in flight, not yet stale -- no second probe
+
+    # The probe never calls record(). `_opened_at` is the original
+    # closed->open transition time (0.0 here, since the clock never
+    # advanced during the failure-recording loop above), so the probe is
+    # considered stale once `cooldown_s + probe_timeout_s` (= 40.0) has
+    # elapsed since then -- i.e. `probe_timeout_s` (10.0) after half-open
+    # began at t=30.0. Just before that, the breaker must still refuse
+    # (otherwise the timeout isn't doing anything).
+    clock["t"] = 39.9
+    assert not breaker.allow_request()
+
+    # Once the full cooldown_s + probe_timeout_s budget has elapsed, the
+    # stale probe must be cleared and a fresh one allowed -- this is the
+    # line that prevents the permanent hang.
+    clock["t"] = 40.1
+    assert breaker.allow_request(), "a stale probe must not deadlock allow_request() forever"
+
+
+def test_circuit_breaker_outcomes_bounded_by_window() -> None:
+    """`_outcomes` is a deque(maxlen=window) -- confirms it self-trims
+    instead of growing unboundedly over a long-running job.
+    """
+    breaker = CircuitBreaker(window=5, threshold=0.99)
+    for _ in range(100):
+        breaker.record(is_failure=False)
+    assert len(breaker._outcomes) == 5

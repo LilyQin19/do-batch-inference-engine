@@ -119,15 +119,33 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
         ctx.counts.in_flight += 1
         start = ctx.clock()
         response = None
-        exc: Exception | None = None
+        exc: ProviderTransportError | None = None
         try:
             response = await ctx.provider.complete(
                 item.prompt, ctx.config.model, ctx.config.max_tokens
             )
+        except asyncio.CancelledError:
+            raise
         except ProviderTransportError as e:
             exc = e
+        except Exception as e:  # noqa: BLE001 -- see comment below
+            # A provider bug (anything not modeled as ProviderTransportError
+            # or a classified HTTP response) must still resolve this item to
+            # a terminal outcome. Letting it propagate would kill this
+            # worker task without ever emitting a RowResult/RowError --
+            # exactly how the conservation invariant
+            # (succeeded + failed == ingested) gets silently violated. Wrap
+            # it as a transport error so it flows through the normal
+            # transient-retry path unchanged.
+            log.exception(
+                "worker.unexpected_provider_exception",
+                job_id=ctx.job_id,
+                item_id=item.id,
+            )
+            exc = ProviderTransportError(f"unexpected error: {e!r}")
+        finally:
+            ctx.counts.in_flight -= 1
         latency = ctx.clock() - start
-        ctx.counts.in_flight -= 1
 
         failure_class, max_attempts = classify(response, exc)
 
@@ -221,17 +239,44 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
 async def worker_loop(ctx: WorkerContext) -> None:
     while True:
         item = await ctx.queue.get()
-        if item is SHUTDOWN:
+        try:
+            if item is SHUTDOWN:
+                return
+            if isinstance(item, RowError):
+                # Already-terminal from ingest (e.g. malformed row) -- pass through.
+                await ctx.sink.submit(item)
+                ctx.counts.failed += 1
+                ctx.counts.pending -= 1
+                _bump_error_class(ctx, item.failure_class)
+                continue
+            assert isinstance(item, PromptItem)
+            try:
+                await process_item(ctx, item)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # Last-resort safety net. process_item is designed to
+                # always resolve an item to a terminal outcome itself (see
+                # its own try/except around the provider call above); this
+                # only fires if some *other*, currently-unknown bug still
+                # lets an exception escape before that item's counts were
+                # mutated. Emitting a terminal RowError here rather than
+                # letting the exception kill this worker task is what keeps
+                # the conservation invariant true even against a defect we
+                # haven't found yet -- the alternative is a queue item that
+                # is never resolved and never task_done()'d.
+                log.exception(
+                    "worker.process_item_unexpected_exception",
+                    job_id=ctx.job_id,
+                    item_id=item.id,
+                )
+                await _emit_error(
+                    ctx,
+                    item.id,
+                    FailureClass.TRANSIENT_EXHAUSTED,
+                    "unexpected exception escaped process_item",
+                    1,
+                    None,
+                )
+        finally:
             ctx.queue.task_done()
-            return
-        if isinstance(item, RowError):
-            # Already-terminal from ingest (e.g. malformed row) -- pass through.
-            await ctx.sink.submit(item)
-            ctx.counts.failed += 1
-            ctx.counts.pending -= 1
-            _bump_error_class(ctx, item.failure_class)
-            ctx.queue.task_done()
-            continue
-        assert isinstance(item, PromptItem)
-        await process_item(ctx, item)
-        ctx.queue.task_done()

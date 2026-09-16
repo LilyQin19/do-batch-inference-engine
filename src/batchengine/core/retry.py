@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import random
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 from batchengine.core.models import FailureClass
@@ -44,9 +45,12 @@ def classify(
     failure that never produced an HTTP response, `response` otherwise.
     """
     if exc is not None:
-        if isinstance(exc, ProviderTransportError):
-            return FailureClass.TRANSIENT, _DEFAULT_MAX_ATTEMPTS
-        raise exc
+        # worker.py converts anything that isn't already a
+        # ProviderTransportError (including arbitrary provider bugs) before
+        # ever calling classify() -- see process_item's except clauses --
+        # so this is a contract check, not a live branch.
+        assert isinstance(exc, ProviderTransportError)
+        return FailureClass.TRANSIENT, _DEFAULT_MAX_ATTEMPTS
 
     assert response is not None
     if response.status_code == 200:
@@ -117,16 +121,28 @@ class CircuitBreaker:
     window: int = 100
     threshold: float = 0.5
     cooldown_s: float = 30.0
+    # Bounds how long a half-open probe can be "in flight" before the
+    # breaker gives up on it and issues a fresh one. Without this, a probe
+    # whose caller crashes or otherwise never calls record() (e.g. the
+    # abort/cancel early-return paths in worker.py::process_item, or any
+    # future bug that skips the record() call) leaves _probe_in_flight
+    # stuck True forever: allow_request() then returns False on every
+    # subsequent call, no attempt is ever counted or budget consumed, and
+    # the job hangs permanently in an infinite sleep(0.25)/continue loop.
+    probe_timeout_s: float = 30.0
     clock: object = field(default=time.monotonic)
-    _outcomes: list[bool] = field(default_factory=list)  # True = failure
+    _outcomes: deque[bool] = field(default_factory=deque)  # True = failure
     _state: str = "closed"  # closed | open | half_open
     _opened_at: float = 0.0
     _probe_in_flight: bool = False
 
+    def __post_init__(self) -> None:
+        # maxlen makes the sliding window self-trimming on append -- no
+        # manual pop(0) needed (and no O(n) shift on every record() call).
+        self._outcomes = deque(self._outcomes, maxlen=self.window)
+
     def record(self, is_failure: bool) -> None:
         self._outcomes.append(is_failure)
-        if len(self._outcomes) > self.window:
-            self._outcomes.pop(0)
         if self._state == "half_open":
             self._probe_in_flight = False
             if is_failure:
@@ -151,6 +167,12 @@ class CircuitBreaker:
                 return True
             return False
         if self._state == "half_open":
+            stale = now - self._opened_at > self.cooldown_s + self.probe_timeout_s
+            if self._probe_in_flight and stale:
+                # The probe that opened half-open state never reported back
+                # (see probe_timeout_s docstring above) -- clear it so a
+                # fresh probe can be issued instead of deadlocking here.
+                self._probe_in_flight = False
             return not self._probe_in_flight
         return True
 

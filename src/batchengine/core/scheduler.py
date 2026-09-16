@@ -151,7 +151,23 @@ class JobRunner:
         finally:
             for _ in workers:
                 await queue.put(SHUTDOWN)
-            await asyncio.gather(*workers)
+            # return_exceptions=True is load-bearing: without it, the first
+            # worker task to raise makes gather itself raise, which skips
+            # `await sink.close()` below entirely -- the sink's writer task
+            # (and its file handle) leaks, and the job never reaches a
+            # terminal status. worker_loop is written to never let an
+            # exception escape (see worker.py), but this is the backstop if
+            # it ever does anyway.
+            worker_results = await asyncio.gather(*workers, return_exceptions=True)
+            for result in worker_results:
+                if isinstance(result, BaseException) and not isinstance(
+                    result, asyncio.CancelledError
+                ):
+                    log.error(
+                        "job.worker_task_exception",
+                        job_id=record.job_id,
+                        error=repr(result),
+                    )
             await sink.close()
 
         optimal = controller.littles_law_optimal_concurrency()
