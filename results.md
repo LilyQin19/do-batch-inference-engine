@@ -22,7 +22,7 @@ Requirement IDs match `docs/design.md` §1.2/§1.3.
 | N2 | Peak RSS independent of N | `scripts/memory_probe.py` → `docs/memory_probe_results.json` (see §4 below); measured at N=1K/10K/100K/500K against the mock provider |
 | N3 | `succeeded + failed == ingested`, always | `tests/integration/test_conservation.py` (10 fixed chaos configs incl. N=1,000 and real-120RPM+chaos); `tests/property/test_conservation_property.py` (15 hypothesis-generated chaos mixes); **live**: `docs/sample_run.json` (1000+0=1000) and `docs/observed_throttling.md` (188+12=200) |
 | N4 | Hard per-job and cross-run spend caps | `core/spend_ledger.py` unit-tested (`tests/unit/test_spend_ledger.py`) for the ledger arithmetic itself. **Gap, noted honestly**: the per-job guard's actual trip-and-abort path (`scheduler.py::on_spend_check`) and the pre-flight 402 refusal in `api/routes.py` (`if is_live: ... total_spend >= max_total_spend_usd`) have **no automated test** — the refusal branch only runs when `is_live=True`, which the zero-credential test suite (N5) never sets. Live-verified only, informally, this session: the pre-flight check ran (and passed, ledger well under cap) before both the 1,000-item run and the throttling experiment. |
-| N5 | Full suite: zero network, zero credentials | CI (`.github/workflows/ci.yml`) never sets `DO_INFERENCE_KEY`. **Three incidents, all fixed this session** (full writeups in `BUILD_LOG.md`): (1) `monkeypatch.delenv("DO_INFERENCE_KEY")` didn't stop `pydantic-settings` reading a real key out of `.env` (a lower-priority but still-consulted source) — fixed to `monkeypatch.setenv(..., "")`. (2) `test_webhook.py` made a real, unmocked DNS lookup (`socket.getaddrinfo("example.com", ...)`, not interceptable by `respx`) — fixed with a monkeypatched fake resolver. (3) every HTTP-driven test runs real `asyncio.sleep`-based retry backoff with no ceiling on cumulative delay under an adversarial chaos config — fixed by adding configurable `retry_base_s`/`retry_cap_s` and setting them to sub-100ms in the test fixture. (2) and (3) together are the suspected cause of two separate >1hr `test (3.12)` CI hangs; a `timeout-minutes: 10` backstop was also added to the workflow. Verified: full suite with `.env` present creates zero new ledger files; full suite runtime dropped from ~93-96s to 80.29s after fix (3). |
+| N5 | Full suite: zero network, zero credentials | CI (`.github/workflows/ci.yml`) never sets `DO_INFERENCE_KEY`. **Two real N5-specific incidents, both fixed**: (1) `monkeypatch.delenv("DO_INFERENCE_KEY")` didn't stop `pydantic-settings` reading a real key out of `.env` (a lower-priority but still-consulted source) — fixed to `monkeypatch.setenv(..., "")`. (2) `test_webhook.py` made a real, unmocked DNS lookup (`socket.getaddrinfo("example.com", ...)`) — fixed with a monkeypatched fake resolver. A third fix (bounding real retry-backoff sleeps) and a `timeout-minutes: 10` CI backstop were also applied while chasing an intermittent `test (3.12)` CI hang, but neither was the hang's actual cause — the real root cause (an ingest-thread cleanup bug, unrelated to network/credentials) is documented in `BUILD_LOG.md`'s "FOURTH INCIDENT" section, not this row, since it isn't an N5 violation. |
 
 ## 2. Live run results
 
@@ -111,10 +111,10 @@ calls, per the §12.2 hard rail on live-run size).
 
 | Category | Count | Notes |
 |---|---|---|
-| Unit (`tests/unit/`) | 81 | Fakes/respx only, no network |
+| Unit (`tests/unit/`) | 82 | Fakes/respx only, no network |
 | Integration (`tests/integration/`) | 30 | Full app via `httpx.ASGITransport`, mock provider |
 | Property (`tests/property/`) | 2 test functions | `hypothesis`-driven: 15 generated chaos mixes (conservation) + 40 generated rate/capacity/pattern combinations (token bucket bound) — i.e. many more than 2 actual cases exercised |
-| **Total** | **113** | 0 failing, 0 skipped |
+| **Total** | **114** | 0 failing, 0 skipped |
 | Coverage | **96%** | Gate is 85% (`pytest --cov`, `--cov-fail-under=85`) |
 | `ruff check .` | Clean | 0 issues |
 | `ruff format --check .` | Clean | 0 files would reformat |

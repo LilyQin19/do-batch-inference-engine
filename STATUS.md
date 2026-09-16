@@ -14,26 +14,35 @@ Single-screen summary. Read this first.
 
 ## Tests / coverage / CI
 
-- **113 tests passing**, 0 failing, 0 skipped.
+- **114 tests passing**, 0 failing, 0 skipped.
 - **96% line coverage** (`pytest --cov`), gate is 85%.
 - `ruff check .` — clean. `ruff format --check .` — clean.
 - `mypy --strict src/` — clean, 0 errors across 30 source files.
 - `.github/workflows/ci.yml` runs all of the above on a 3.11/3.12 matrix
   plus `docker build .`, with zero secrets required anywhere in the
-  pipeline. **Confirmed green** on the current `main` (run
-  [35139617254](https://github.com/LilyQin19/do-batch-inference-engine/actions/runs/35139617254)):
-  `test (3.11)` 1m25s, `test (3.12)` 1m39s, `docker` 18s — all passed.
-  This run followed two prior CI hangs on `test (3.12)` specifically
-  (never `test (3.11)`) after two earlier fixes; rather than guess a
-  fourth time, added `pytest-timeout`/`PYTHONFAULTHANDLER` diagnostics
-  and pushed instrumentation-only, and this run passed clean with no
-  60s-per-test timeout ever firing — real confirmation under CI's actual
-  conditions, not an inference from a passing local run. `timeout-minutes: 10`
-  stays as a backstop against any future regression of this kind. Full
-  incident history in `BUILD_LOG.md`. One cosmetic, non-blocking warning
-  (an `aiosqlite` background-thread teardown race, caught by pytest as a
-  warning, never failing a build) surfaced in that run's diagnostics and
-  is logged as `OPEN_QUESTIONS.md` item #6 rather than chased further.
+  pipeline. **The CI hang is fixed and understood, not just "currently
+  green."** The real root cause: `core/ingest.py`'s producer thread kept
+  iterating an *entire remaining large file* after an early
+  cancel/abort, cross-thread round-tripping every leftover row; under
+  `pytest-cov`'s tracing overhead on GitHub's 2-vCPU runner this
+  compounded into minutes, and a `concurrent.futures` `atexit` hook then
+  blocked the whole process from exiting until that thread finally
+  finished — invisible to a per-test timeout because the hang was in
+  interpreter shutdown, not inside any test. Fixed with a cooperative
+  stop signal (one `threading.Event`, checked once per row) and covered
+  by a new regression test
+  (`tests/unit/test_ingest.py::test_producer_stops_promptly_on_early_close_of_a_large_file`,
+  confirmed to fail against the pre-fix code first). Three earlier fixes
+  (dotenv key fallback, unmocked DNS, unbounded retry-backoff sleep)
+  were each real bugs worth fixing but were not, in the end, the cause
+  of the hang — full retrospective, including why each apparent "clean
+  run" after those fixes was coincidental timing rather than resolution,
+  in `BUILD_LOG.md`'s "FOURTH INCIDENT" section. `timeout-minutes: 10`
+  and `pytest-timeout --timeout=60` stay as backstops against a future
+  regression. One cosmetic, non-blocking warning (an `aiosqlite`
+  background-thread teardown race, caught by pytest as a warning, never
+  failing a build) remains logged as `OPEN_QUESTIONS.md` item #6, not
+  chased further.
 
 ## Post-review fixes (read this section if you're re-checking after a review)
 

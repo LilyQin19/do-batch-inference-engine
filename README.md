@@ -306,11 +306,18 @@ the test environment, so `POST /job` always selects the mock provider (see
 - Wire DigitalOcean Spaces checkpointing (`extensions/spaces.py`) into a
   real bucket and add a `moto`-backed integration test — implemented but
   untested against anything but the interface it presents.
-- Run the deliberate over-rate observation experiment (§6.8 of
-  instructions.md) once a key is provisioned, and fold the observed
-  `x-ratelimit-reset-requests` behavior back into `docs/observed_throttling.md`.
-  Also pending on a key: the one full 1,000-item live run this build's spec
-  calls for, and `docs/sample_run.json`.
+- Close the two honestly-marked test-coverage gaps in `results.md` §1 (N4):
+  the per-job spend guard's trip-and-abort path and the pre-flight
+  ledger-exhausted `402` refusal. Both are structurally unreachable in a
+  zero-credential suite (they only run when `is_live=True`), so covering
+  them means injecting a fake live provider rather than relaxing N5 —
+  worth doing, but not at the cost of the zero-credential guarantee.
+- Revisit `AdaptiveController.max_rate = rate_rps × 1.5` now that the
+  1,000-item live run has shown what it costs: 11 avoidable 429s
+  re-discovering a limit the operator already configured (see
+  `docs/decisions.md`). The one-line `max_rate = rate_rps` fix was left
+  unmade deliberately; with a known-exact quota it is probably the right
+  default, with the 1.5× headroom becoming opt-in for unknown quotas.
 - Replace the download endpoint's synchronous per-line file read with true
   async file I/O (`aiofiles` or a thread executor) — currently a known,
   documented simplification (see `OPEN_QUESTIONS.md`) that blocks the event

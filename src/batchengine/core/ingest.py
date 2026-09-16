@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 
@@ -92,10 +93,25 @@ async def stream_items(path: str | Path) -> AsyncGenerator[PromptItem | RowError
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=64)
     sentinel = object()
     error_box: list[BaseException] = []
+    # Cooperative stop signal for the producer thread. Without this, an
+    # early consumer exit (job cancelled/aborted partway through a large
+    # file) still leaves the producer blindly iterating and cross-thread
+    # round-tripping *every remaining row* -- for a 1,000-2,000 row file
+    # aborted near the start, that's ~1,000+ `run_coroutine_threadsafe(...)
+    # .result()` round-trips that buy nothing, since nothing is consuming
+    # them anymore. Each round-trip is cheap in isolation, but under
+    # coverage instrumentation on a CPU-constrained runner they compound
+    # into minutes -- the suspected cause of an intermittent multi-minute
+    # CI hang localized to exactly the two tests that cancel/abort a
+    # large file (see BUILD_LOG.md). Checked once per row, so at most one
+    # more row is attempted after the signal is set.
+    stop = threading.Event()
 
     def producer() -> None:
         try:
             for result in iter_items_sync(path):
+                if stop.is_set():
+                    return
                 asyncio.run_coroutine_threadsafe(queue.put(result), loop).result()
         except BaseException as exc:  # noqa: BLE001 -- forwarded to the consumer below
             error_box.append(exc)
@@ -110,9 +126,11 @@ async def stream_items(path: str | Path) -> AsyncGenerator[PromptItem | RowError
                 break
             yield result  # type: ignore[misc]
     finally:
-        # If the consumer stops early (job cancelled/aborted mid-ingest), the
-        # producer thread may be blocked inside queue.put() waiting for
-        # space. Drain so it can finish instead of leaking a thread.
+        # If the consumer stops early, tell the producer to stop reading
+        # more rows, then drain whatever's already in the queue so a
+        # producer blocked inside queue.put() (waiting for space) can
+        # finish instead of leaking a thread.
+        stop.set()
         while not future.done():
             try:
                 queue.get_nowait()

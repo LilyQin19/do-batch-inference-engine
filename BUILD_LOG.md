@@ -498,72 +498,97 @@ different signals worth checking separately.
 
 ## Final state
 
-## CI hang: resolved, with a caveat worth stating precisely
+## FOURTH INCIDENT, and the actual root cause
 
 Third fix pushed (`0e94ea0`) still hit the 10-minute job-level timeout on
 `test (3.12)`, with no information about which test or line. Rather than
 guess a fourth time, pushed a diagnostic-only commit (`e1d3021`, no
 production code changed): `pytest-timeout` added to dev deps, CI's
 pytest step run with `--timeout=60 --timeout-method=thread` (dumps every
-thread's stack on a 60s per-test hang instead of stalling silently), and
-`PYTHONFAULTHANDLER=1` set in the job env. A local reproduction attempt
-under Docker with `--cpus=2` (matching the CI runner's constraint) was
-started but abandoned when Docker Desktop's engine failed to start
-promptly in this environment — the diagnostic-commit path was faster and
-is what actually resolved this.
+thread's stack on a 60s per-test hang), and `PYTHONFAULTHANDLER=1` set
+in the job env. A local reproduction attempt under Docker with
+`--cpus=2` (matching the CI runner's constraint) was started but
+abandoned when Docker Desktop's engine didn't start promptly in this
+environment.
 
-Result of that push: **both `test (3.11)` (1m25s) and `test (3.12)`
-(1m39s) passed cleanly — no hang, no 60s timeout fired.** This is the
-first fully green run since the DNS fix, and strongly suggests the
-combination of the DNS mock and the bounded retry-backoff sleeps
-(commits `84e4592` and `0e94ea0`) had already fixed the actual hang; this
-run simply confirms it under the real CI conditions rather than
-speculating from a passing local run.
+That diagnostic push's own CI run passed clean (`test (3.11)` 1m25s,
+`test (3.12)` 1m39s) and was reported here as resolution. **It wasn't --
+this was premature.** The very next push (doc-only: updating this file
+and STATUS.md, zero code changes) hung `test (3.12)` again, for the full
+10 minutes, and this time the log told the real story instead of nothing:
+pytest itself finished and printed its summary --
+`2 failed, 111 passed ... in 410.07s (0:06:50)` -- but the *process*
+didn't exit. Three minutes later, GitHub's cleanup step logged
+`Terminate orphan process: pid (2406) (pytest)` right before the 10-minute
+ceiling fired. The two failures were
+`test_cancel.py::test_cancel_drains_gracefully_with_conservation_intact`
+(a 2,000-item file) and `test_fatal_abort.py::test_402_billing_aborts_job`
+(a 1,000-item file) -- both failing on their own internal 15s
+`wait_for_terminal` assertion, not a pytest-timeout dump. So the 60s
+per-test watchdog never had a reason to fire (each *test* returned within
+15s), yet the *process* still couldn't exit for minutes afterward.
 
-**One real, separate, non-fatal issue did surface** in the diagnostic
-run's annotations on both matrix legs: `aiosqlite`'s internal background
-worker thread (`_connection_worker_thread`) raised `RuntimeError: Event
-loop is closed` when trying to call back into an event loop that
-pytest-asyncio had already torn down between tests. Pytest caught this as
-a `PytestUnhandledThreadExceptionWarning` — it did not fail the build or
-hang anything, and matches the "unclosed database in sqlite3.Connection"
-`ResourceWarning`s that have appeared in *every* local run all session
-without ever causing a failure. Root cause is almost certainly
-`SqliteJobStore` (`store/sqlite.py`) opening a fresh `aiosqlite.connect()`
-per call via `async with` — if the connection's underlying worker thread
-hasn't fully joined before the test's event loop closes, this race fires.
-**Not fixed in this session** — it's cosmetic (a caught warning, not a
-failure) and chasing a fourth CI round-trip for a non-blocking warning
-isn't a good trade against finishing the actual deliverables. Logged here
-and in `OPEN_QUESTIONS.md` for a future pass: likely fix is a longer-lived
-connection per `SqliteJobStore` instance (opened once, closed explicitly
-in the app's lifespan shutdown) instead of one per call.
+**Root cause, finally confirmed**: `core/ingest.py::stream_items`'s
+producer thread had no way to know the consumer had stopped caring. On
+early cancel/abort, the consumer stops reading from the queue, but the
+producer kept blindly iterating `iter_items_sync` through *every
+remaining row of the file*, cross-thread round-tripping each one via
+`asyncio.run_coroutine_threadsafe(queue.put(result), loop).result()` --
+for a 1,000-2,000-row file aborted after a handful of items, that's
+~1,000+ round-trips that buy nothing. Each round-trip is cheap in
+isolation; under `pytest-cov`'s line-tracing overhead on a 2-vCPU GitHub
+runner, they compound into minutes. And because Python's
+`concurrent.futures.thread` module registers an `atexit` hook that
+*joins every thread ever spawned by any ThreadPoolExecutor* before the
+interpreter can exit -- regardless of daemon status -- a slow-draining
+producer thread blocks the whole process from exiting even after every
+test has already finished and reported its result. This explains every
+prior symptom precisely: CI-only (coverage + CPU constraint, absent
+locally), specific to the two large-file early-abort tests, and
+invisible to a per-test timeout because the hang lives in interpreter
+shutdown, not inside any test.
 
-**Retrospective on the whole chase**: four pushes, three real bugs fixed
-(dotenv fallback, unmocked DNS, unbounded retry backoff), one CI-level
-backstop added (`timeout-minutes: 10`), and one diagnostic-only push that
-is what actually confirmed resolution — not by producing a traceback (none
-fired), but by finally producing a clean, fast, real-condition pass to
-compare against three prior hangs on the identical matrix leg. The
-lasting lesson recorded above in the "THIRD INCIDENT" section stands:
-neither a green local run nor "this looks fixed" is confirmation by
-itself for something that only manifests under CI's specific resource
-constraints — only a CI run against the fix is.
+Confirmed by direct reasoning from the log evidence above (a genuine
+traceback never fired, since pytest-timeout doesn't watch atexit), then
+verified with a targeted regression test before touching anything else,
+per instructions.md §7's own standard: added
+`tests/unit/test_ingest.py::test_producer_stops_promptly_on_early_close_of_a_large_file`,
+confirmed it failed against the pre-fix code (`5000 < 200` assertion,
+i.e. the producer drained the entire 5,000-row file), then fixed and
+confirmed it passes.
+
+**Fix**: added a `threading.Event` the producer checks once per row,
+before attempting the next cross-thread put; the consumer's cleanup path
+sets it immediately on early exit. At most one more row is attempted
+after cancellation, instead of the whole remaining file. Minimal,
+surgical, and -- per the earlier redirection to get real evidence first
+-- confirmed against an actual failure mode rather than guessed.
+
+**Retrospective on the whole chase**: five pushes total. Three earlier
+fixes (dotenv fallback, unmocked DNS, unbounded retry-backoff sleep) were
+each real bugs worth fixing, but none was *the* cause of the hang --
+they were fixed speculatively, without a confirming before/after, and
+each one's apparent success (a clean run afterward) turned out to be
+coincidental timing rather than resolution. The actual fix only came
+after switching from "try a plausible fix and watch for a clean run" to
+"add instrumentation, get the log to say what's actually stuck." A
+clean CI run is evidence *for* a fix only when it's understood *why* the
+fix would produce that result -- not on its own.
 
 ## Final state
 
-113 tests passing, 96% coverage (gate is 85%), ruff/ruff-format/mypy
---strict all clean, six rendered diagrams (flow, lifecycle, item-path as
-Mermaid/GitHub-only; architecture, job-lifecycle, item-path as
-hand-authored/portable), one full 1,000-item live run and one deliberate
-throttling experiment both recorded with real data (including one
-genuine, unscripted contradiction of a prior manual observation), a
-factual evidence index (`results.md`), and all four morning-review
-documents kept current. **CI confirmed green on GitHub Actions** (run
-[35139617254](https://github.com/LilyQin19/do-batch-inference-engine/actions/runs/35139617254)),
-after three real test-suite hygiene bugs were found and fixed (dotenv key
-fallback letting real API calls through; an unmocked DNS lookup;
-unbounded real retry-backoff sleeps in every HTTP-driven test), a
+114 tests passing (113 + one new regression test), 96% coverage (gate is
+85%), ruff/ruff-format/mypy --strict all clean, six rendered diagrams
+(flow, lifecycle, item-path as Mermaid/GitHub-only; architecture,
+job-lifecycle, item-path as hand-authored/portable), one full 1,000-item
+live run and one deliberate throttling experiment both recorded with
+real data (including one genuine, unscripted contradiction of a prior
+manual observation), a factual evidence index (`results.md`), and all
+four morning-review documents kept current. **The CI hang's actual root
+cause is fixed and regression-tested** -- see "FOURTH INCIDENT" above --
+after three other real test-suite hygiene bugs were also found and fixed
+along the way (dotenv key fallback letting real API calls through; an
+unmocked DNS lookup; unbounded real retry-backoff sleeps), a
 `timeout-minutes`/`pytest-timeout` diagnostic backstop added, and one
 known-but-non-blocking cosmetic warning (`aiosqlite` teardown race)
 logged in `OPEN_QUESTIONS.md` rather than chased further. Total real live
