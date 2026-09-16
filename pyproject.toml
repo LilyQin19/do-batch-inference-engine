@@ -25,6 +25,7 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "psutil>=6.0",
+    "pytest-timeout>=2.3",
 ]
 spaces = ["aioboto3>=13.1"]
 

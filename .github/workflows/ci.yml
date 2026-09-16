@@ -15,6 +15,12 @@ jobs:
     # either one fails loudly and fast instead of silently burning CI
     # minutes for hours.
     timeout-minutes: 10
+    env:
+      # Diagnostic: if a test hangs, dump the interpreter's thread stacks
+      # instead of just sitting there. Combined with pytest-timeout below,
+      # a hang now reports the stuck frame instead of only the job-level
+      # 10-minute ceiling firing with no other information.
+      PYTHONFAULTHANDLER: "1"
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -43,7 +49,15 @@ jobs:
         # app always constructs MockProvider (see api/routes.py). This is
         # what "the entire test suite runs with zero network and zero API
         # keys" (instructions.md §2) means in practice, not just in prose.
-        run: pytest --cov=src/batchengine --cov-report=xml --cov-report=term --cov-fail-under=85
+        #
+        # --timeout=60 --timeout-method=thread: diagnostic for an
+        # intermittent hang on this exact matrix leg (see BUILD_LOG.md) --
+        # three speculative fixes landed without a traceback to confirm
+        # any of them. thread-method timeout dumps every thread's stack on
+        # timeout, naming the stuck test and the exact stuck line, so a
+        # recurrence fails in ~1 minute with a diagnosis instead of
+        # stalling for the full 10-minute job ceiling with no information.
+        run: pytest --cov=src/batchengine --cov-report=xml --cov-report=term --cov-fail-under=85 --timeout=60 --timeout-method=thread
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
