@@ -113,11 +113,47 @@ would have been a schema addition beyond what was asked.
 
 **Cost to reverse:** low -- confined to `api/routes.py::submit_job`.
 
+## 6. `aiosqlite` background-thread teardown race (known, not fixed)
+
+**What was found:** a live CI run's diagnostic instrumentation
+(`PYTHONFAULTHANDLER=1`, `pytest-timeout`) surfaced
+`aiosqlite`'s internal `_connection_worker_thread` occasionally raising
+`RuntimeError: Event loop is closed` when it tries to call back into an
+event loop that `pytest-asyncio` has already torn down between tests.
+Caught by pytest as a `PytestUnhandledThreadExceptionWarning` -- it has
+never failed a build or caused a hang, and matches the "unclosed database
+in sqlite3.Connection" `ResourceWarning`s visible in every local run all
+session.
+
+**What was chosen:** leave it. It's cosmetic (a caught warning on test
+teardown, not a production-path failure), and `store/sqlite.py`'s actual
+behavior -- open, use, close a connection per call via `async with` -- is
+correct for the running app; the race is specific to how quickly
+`pytest-asyncio` closes a test's loop relative to how quickly
+`aiosqlite`'s worker thread finishes joining.
+
+**Alternative not taken:** give `SqliteJobStore` one longer-lived
+connection per instance (opened once, explicitly closed in the app's
+lifespan shutdown) instead of one per call -- would likely eliminate the
+race and is probably the right shape for a future pass, but wasn't made
+this session to avoid another speculative fix without a confirming
+before/after CI comparison, per the lesson in `BUILD_LOG.md`'s "CI hang"
+section.
+
+**Cost to reverse:** low -- confined to `store/sqlite.py`; not urgent.
+
 ## SPEC-CORRECTIONS (§12.5)
 
-None identified that required deviating from instructions.md's design. The
-one place reality could plausibly contradict the spec --
-`x-ratelimit-reset-requests`'s exact semantics (continuous projection vs.
-fixed window) -- was never tested against a live endpoint in this build (no
-key was provisioned), so it's recorded as *pending verification*, not as a
-correction, in `docs/observed_throttling.md`.
+One live-verified contradiction, recorded in full in
+`docs/observed_throttling.md` and `docs/decisions.md`: observed
+`x-ratelimit-limit-tokens-per-minute` (750000) and
+`x-ratelimit-limit-tokens-per-day` (8000000) both differ from a
+pre-recorded manual baseline (500000 / 6000000), and
+`x-ratelimit-remaining-tokens-per-day` was observed to decrement across
+calls, contradicting the baseline's claim that it stayed pinned. Only
+`x-ratelimit-limit-requests: 120` matched. No code assumes the baseline's
+specific numbers (this codebase reads every `x-ratelimit-*` header live
+and never hardcodes a limit value), so no code change followed --
+`x-ratelimit-reset-requests`'s behavior *was* verified live and confirmed
+to match §1.3's "continuous forward-refill projection" description, which
+is the one part of the spec this section previously flagged as untested.

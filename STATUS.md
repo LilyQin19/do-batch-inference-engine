@@ -20,14 +20,20 @@ Single-screen summary. Read this first.
 - `mypy --strict src/` — clean, 0 errors across 30 source files.
 - `.github/workflows/ci.yml` runs all of the above on a 3.11/3.12 matrix
   plus `docker build .`, with zero secrets required anywhere in the
-  pipeline. **Confirmed green on GitHub Actions** (run
-  [35134802423](https://github.com/LilyQin19/do-batch-inference-engine/actions/runs/35134802423)):
-  `test (3.11)` 1m50s, `docker` 29s, `test (3.12)` 2m0s — all passed, and
-  confirmed the DNS-lookup fix (incident 2 below). The *very next* push
-  (docs-only, zero code changes) then hung again on `test (3.12)` for a
-  *different* reason (incident 3 below, real retry-backoff sleeps) —
-  fixed and pushed; see the git log / next CI run for the current
-  confirmed-green status once it completes.
+  pipeline. **Confirmed green** on the current `main` (run
+  [35139617254](https://github.com/LilyQin19/do-batch-inference-engine/actions/runs/35139617254)):
+  `test (3.11)` 1m25s, `test (3.12)` 1m39s, `docker` 18s — all passed.
+  This run followed two prior CI hangs on `test (3.12)` specifically
+  (never `test (3.11)`) after two earlier fixes; rather than guess a
+  fourth time, added `pytest-timeout`/`PYTHONFAULTHANDLER` diagnostics
+  and pushed instrumentation-only, and this run passed clean with no
+  60s-per-test timeout ever firing — real confirmation under CI's actual
+  conditions, not an inference from a passing local run. `timeout-minutes: 10`
+  stays as a backstop against any future regression of this kind. Full
+  incident history in `BUILD_LOG.md`. One cosmetic, non-blocking warning
+  (an `aiosqlite` background-thread teardown race, caught by pytest as a
+  warning, never failing a build) surfaced in that run's diagnostics and
+  is logged as `OPEN_QUESTIONS.md` item #6 rather than chased further.
 
 ## Post-review fixes (read this section if you're re-checking after a review)
 

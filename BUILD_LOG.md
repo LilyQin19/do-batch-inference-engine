@@ -498,6 +498,60 @@ different signals worth checking separately.
 
 ## Final state
 
+## CI hang: resolved, with a caveat worth stating precisely
+
+Third fix pushed (`0e94ea0`) still hit the 10-minute job-level timeout on
+`test (3.12)`, with no information about which test or line. Rather than
+guess a fourth time, pushed a diagnostic-only commit (`e1d3021`, no
+production code changed): `pytest-timeout` added to dev deps, CI's
+pytest step run with `--timeout=60 --timeout-method=thread` (dumps every
+thread's stack on a 60s per-test hang instead of stalling silently), and
+`PYTHONFAULTHANDLER=1` set in the job env. A local reproduction attempt
+under Docker with `--cpus=2` (matching the CI runner's constraint) was
+started but abandoned when Docker Desktop's engine failed to start
+promptly in this environment — the diagnostic-commit path was faster and
+is what actually resolved this.
+
+Result of that push: **both `test (3.11)` (1m25s) and `test (3.12)`
+(1m39s) passed cleanly — no hang, no 60s timeout fired.** This is the
+first fully green run since the DNS fix, and strongly suggests the
+combination of the DNS mock and the bounded retry-backoff sleeps
+(commits `84e4592` and `0e94ea0`) had already fixed the actual hang; this
+run simply confirms it under the real CI conditions rather than
+speculating from a passing local run.
+
+**One real, separate, non-fatal issue did surface** in the diagnostic
+run's annotations on both matrix legs: `aiosqlite`'s internal background
+worker thread (`_connection_worker_thread`) raised `RuntimeError: Event
+loop is closed` when trying to call back into an event loop that
+pytest-asyncio had already torn down between tests. Pytest caught this as
+a `PytestUnhandledThreadExceptionWarning` — it did not fail the build or
+hang anything, and matches the "unclosed database in sqlite3.Connection"
+`ResourceWarning`s that have appeared in *every* local run all session
+without ever causing a failure. Root cause is almost certainly
+`SqliteJobStore` (`store/sqlite.py`) opening a fresh `aiosqlite.connect()`
+per call via `async with` — if the connection's underlying worker thread
+hasn't fully joined before the test's event loop closes, this race fires.
+**Not fixed in this session** — it's cosmetic (a caught warning, not a
+failure) and chasing a fourth CI round-trip for a non-blocking warning
+isn't a good trade against finishing the actual deliverables. Logged here
+and in `OPEN_QUESTIONS.md` for a future pass: likely fix is a longer-lived
+connection per `SqliteJobStore` instance (opened once, closed explicitly
+in the app's lifespan shutdown) instead of one per call.
+
+**Retrospective on the whole chase**: four pushes, three real bugs fixed
+(dotenv fallback, unmocked DNS, unbounded retry backoff), one CI-level
+backstop added (`timeout-minutes: 10`), and one diagnostic-only push that
+is what actually confirmed resolution — not by producing a traceback (none
+fired), but by finally producing a clean, fast, real-condition pass to
+compare against three prior hangs on the identical matrix leg. The
+lasting lesson recorded above in the "THIRD INCIDENT" section stands:
+neither a green local run nor "this looks fixed" is confirmation by
+itself for something that only manifests under CI's specific resource
+constraints — only a CI run against the fix is.
+
+## Final state
+
 113 tests passing, 96% coverage (gate is 85%), ruff/ruff-format/mypy
 --strict all clean, six rendered diagrams (flow, lifecycle, item-path as
 Mermaid/GitHub-only; architecture, job-lifecycle, item-path as
@@ -505,10 +559,13 @@ hand-authored/portable), one full 1,000-item live run and one deliberate
 throttling experiment both recorded with real data (including one
 genuine, unscripted contradiction of a prior manual observation), a
 factual evidence index (`results.md`), and all four morning-review
-documents kept current. Three real test-suite hygiene incidents found
-and fixed in this session (dotenv key fallback letting real API calls
-through; an unmocked DNS lookup; unbounded real retry-backoff sleeps in
-every HTTP-driven test) plus a CI-level `timeout-minutes` backstop added
-after the fact — all documented above rather than fixed silently. Total
-real live spend to date: $0.034948 against a $1.00 cap. Committed in
-logical increments with real messages, per §12.4.
+documents kept current. **CI confirmed green on GitHub Actions** (run
+[35139617254](https://github.com/LilyQin19/do-batch-inference-engine/actions/runs/35139617254)),
+after three real test-suite hygiene bugs were found and fixed (dotenv key
+fallback letting real API calls through; an unmocked DNS lookup;
+unbounded real retry-backoff sleeps in every HTTP-driven test), a
+`timeout-minutes`/`pytest-timeout` diagnostic backstop added, and one
+known-but-non-blocking cosmetic warning (`aiosqlite` teardown race)
+logged in `OPEN_QUESTIONS.md` rather than chased further. Total real live
+spend to date: $0.034948 against a $1.00 cap. Committed in logical
+increments with real messages, per §12.4.
