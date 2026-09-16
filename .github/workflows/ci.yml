@@ -7,6 +7,14 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # Safety net, not a fix: the test suite normally finishes in ~1-2
+    # minutes. It hung for over an hour twice during development (a real
+    # unmocked DNS lookup once, real-time retry backoff sleeps in
+    # chaos-heavy tests once -- both since fixed, see BUILD_LOG.md) before
+    # anything caught it. A hard ceiling means a *future* regression like
+    # either one fails loudly and fast instead of silently burning CI
+    # minutes for hours.
+    timeout-minutes: 10
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]

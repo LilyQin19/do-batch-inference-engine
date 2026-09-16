@@ -434,6 +434,68 @@ in under 4 seconds; full suite rerun, 113 passed, 96% coverage
 maintained. Cancelled the stuck CI run (`gh run cancel`) rather than wait
 out its timeout, since the fix needed to ship in the next push anyway.
 
+## THIRD INCIDENT: the DNS fix wasn't the whole story — real retry backoff sleeps
+
+Pushed the DNS fix, watched CI: `test (3.12)` on that push passed clean
+in 2m0s (confirming the DNS fix worked). Pushed one more commit (two
+markdown lines changed, zero test/source code) immediately after, and
+`test (3.12)` **hung again** — 9+ minutes and still on the same `pytest
+with coverage` step, on byte-identical test code to the run that had
+just passed in 2 minutes. Since the code was unchanged, this had to be
+non-determinism in the suite itself, not a deterministic bug the DNS fix
+would have caught.
+
+Root cause: every HTTP-driven test (all of `tests/integration/` and
+`tests/property/`) runs the *real* scheduler/worker pipeline, and
+`core/worker.py`'s retry backoff (`full_jitter_delay`, §6.2 defaults:
+0.5s base, 30s cap) uses real `asyncio.sleep` there — nothing in that
+path substitutes a fake sleep the way the pure-unit worker/ratelimit
+tests do. A `THROTTLED` item can reach 8 attempts; full jitter draws
+uniformly up to `min(30, 0.5 * 2**attempt)` per retry, so a single
+item's worst case alone approaches 30s, and a chaos-heavy config (many
+items each needing several retries — `tests/property/test_conservation_property.py`
+generates its chaos parameters via `hypothesis`, whose random examples
+are not fixed-seeded across runs) can legitimately accumulate real
+minutes of cumulative sleep. `@settings(deadline=None)` on that property
+test (added early on, because these async tests routinely exceed
+hypothesis's default 200ms per-example deadline) means hypothesis
+enforces no ceiling on how long a single example is allowed to take
+either. None of this was ever slow enough to notice across dozens of
+local runs on a fast machine with no network contention; a shared,
+possibly-contended GitHub Actions runner is a different story, and
+apparently different enough to hang twice on the exact same
+Python-3.12 matrix leg.
+
+Fixed properly this time, not just for the one path: added
+`retry_base_s`/`retry_cap_s` to `WorkerContext` (threaded through
+`JobRunner` and a new `BATCHENGINE_RETRY_BASE_S`/`BATCHENGINE_RETRY_CAP_S`
+setting, mirroring the existing `circuit_cooldown_s` pattern), and set
+both to sub-100ms values in `tests/conftest.py`'s `app_client_factory` —
+every retry sleep across the entire HTTP-driven suite is now bounded to
+well under a second, regardless of how adversarial a chaos config (fixed
+or hypothesis-generated) turns out to be. Also added `timeout-minutes: 10`
+to the CI workflow's `test` job as a backstop — not a fix for this or any
+specific bug, but insurance that a *future* regression like either of
+these two fails loudly in under 10 minutes instead of silently burning
+CI runner-hours.
+
+Verified: full local suite, 113 passed, 96% coverage, **80.29s** total
+(down from ~93-96s pre-fix) — confirming these sleeps were costing real
+time even on runs that never got unlucky enough to hang. Cancelled the
+second stuck CI run; the next push (with this fix included) is the one
+to check for a clean `test (3.12)`.
+
+**Lasting takeaway, stated plainly for the next reviewer**: an
+HTTP-driven test that exercises real retry/backoff logic through the
+actual scheduler is exercising real `asyncio.sleep` unless something
+explicitly overrides it — "the mock provider has no network path" bounds
+requests, not wall-clock time. Two independent bugs (DNS, backoff sleep)
+both hid behind "it always passes locally," and both only surfaced as an
+intermittent multi-minute-to-multi-hour CI hang on one specific matrix
+leg. Neither would have been caught by `ruff`, `mypy`, or a normal green
+test run — only by noticing that "passed" and "took this long" are two
+different signals worth checking separately.
+
 ## Final state
 
 113 tests passing, 96% coverage (gate is 85%), ruff/ruff-format/mypy
@@ -443,8 +505,10 @@ hand-authored/portable), one full 1,000-item live run and one deliberate
 throttling experiment both recorded with real data (including one
 genuine, unscripted contradiction of a prior manual observation), a
 factual evidence index (`results.md`), and all four morning-review
-documents kept current. Two real "zero network/credentials" hygiene
-incidents found and fixed in this session (dotenv key fallback; unmocked
-DNS lookup) — both documented above rather than fixed silently. Total
+documents kept current. Three real test-suite hygiene incidents found
+and fixed in this session (dotenv key fallback letting real API calls
+through; an unmocked DNS lookup; unbounded real retry-backoff sleeps in
+every HTTP-driven test) plus a CI-level `timeout-minutes` backstop added
+after the fact — all documented above rather than fixed silently. Total
 real live spend to date: $0.034948 against a $1.00 cap. Committed in
 logical increments with real messages, per §12.4.

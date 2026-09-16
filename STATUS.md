@@ -22,10 +22,12 @@ Single-screen summary. Read this first.
   plus `docker build .`, with zero secrets required anywhere in the
   pipeline. **Confirmed green on GitHub Actions** (run
   [35134802423](https://github.com/LilyQin19/do-batch-inference-engine/actions/runs/35134802423)):
-  `test (3.11)` 1m50s, `docker` 29s, `test (3.12)` 2m0s — all passed. This
-  is also the fix-verification run: the *previous* push's `test (3.12)`
-  leg had hung for over an hour on a real (unmocked) DNS lookup in
-  `test_webhook.py` (see below); this run's 2m0s confirms the fix.
+  `test (3.11)` 1m50s, `docker` 29s, `test (3.12)` 2m0s — all passed, and
+  confirmed the DNS-lookup fix (incident 2 below). The *very next* push
+  (docs-only, zero code changes) then hung again on `test (3.12)` for a
+  *different* reason (incident 3 below, real retry-backoff sleeps) —
+  fixed and pushed; see the git log / next CI run for the current
+  confirmed-green status once it completes.
 
 ## Post-review fixes (read this section if you're re-checking after a review)
 
@@ -100,13 +102,19 @@ complete.**
 - `.env` reverted to `.env.example`'s defaults (`RATE_LIMIT_RPM=120`,
   `LIVE_SAMPLE_SIZE=50`) once both experiments finished.
 
-**Incident during this work, fixed and documented**: the test fixture's
+**Three incidents during this work, all found, fixed, and documented**
+(full writeups in `BUILD_LOG.md`): (1) the test fixture's
 `DO_INFERENCE_KEY` isolation had a real gap (`monkeypatch.delenv` doesn't
 block `pydantic-settings`'s dotenv fallback) that let ~11 test-suite runs
 make real live calls once `.env` existed, for ~$0.0112 not originally
-recorded in the persistent ledger. Fixed and verified (full suite rerun
-with `.env` present, zero new ledger files created anywhere). Full
-writeup: `BUILD_LOG.md`.
+recorded in the persistent ledger — fixed and verified. (2) A test made a
+real, unmocked DNS lookup, and (3) every HTTP-driven test ran real,
+uncapped retry-backoff sleeps under the actual scheduler — together the
+suspected cause of two separate >1hr CI hangs on the `test (3.12)` matrix
+leg (see "Tests / coverage / CI" above). Both fixed, verified locally
+(113 passed, 96% coverage, suite runtime down to 80.29s), and a
+`timeout-minutes: 10` backstop added to CI so a future regression like
+either fails fast instead of silently hanging.
 
 ## Total spend
 

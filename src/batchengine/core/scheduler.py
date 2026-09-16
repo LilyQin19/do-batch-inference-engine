@@ -55,12 +55,16 @@ class JobRunner:
         webhook_secret: str = "",
         allow_private_webhooks: bool = False,
         circuit_cooldown_s: float = 30.0,
+        retry_base_s: float = 0.5,
+        retry_cap_s: float = 30.0,
     ) -> None:
         self.record = record
         self.provider = provider
         self.store = store
         self.rate_limit_rpm = rate_limit_rpm
         self.circuit_cooldown_s = circuit_cooldown_s
+        self.retry_base_s = retry_base_s
+        self.retry_cap_s = retry_cap_s
         self.cancel_event = asyncio.Event()
         self._http_client = http_client
         self._webhook_secret = webhook_secret
@@ -140,6 +144,8 @@ class JobRunner:
             abort_event=abort_event,
             cancel_event=self.cancel_event,
             on_spend_check=on_spend_check,
+            retry_base_s=self.retry_base_s,
+            retry_cap_s=self.retry_cap_s,
         )
 
         workers = [asyncio.create_task(worker_loop(worker_ctx)) for _ in range(concurrency)]

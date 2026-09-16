@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     # tests/unit/test_retry.py; this only controls how long a real,
     # HTTP-driven test has to wait out an open breaker in wall-clock time.
     batchengine_circuit_cooldown_s: float = 30.0
+    # §6.2 defaults: 0.5s base, 30s cap. Same overridability rationale as
+    # the cooldown above -- full_jitter_delay's *math* is unit-tested with
+    # no real sleep in tests/unit/test_retry.py; this only bounds how much
+    # real wall-clock time an HTTP-driven test's retries can cost. Left at
+    # production values, a retry-heavy chaos config (many THROTTLED items
+    # each up to 8 attempts, drawing up to the 30s cap) can accumulate
+    # minutes of real sleep -- this is suspected to have caused an
+    # intermittent CI hang (see BUILD_LOG.md).
+    batchengine_retry_base_s: float = 0.5
+    batchengine_retry_cap_s: float = 30.0
 
     batchengine_max_job_spend_usd: float = 0.25
     batchengine_max_total_spend_usd: float = 1.00

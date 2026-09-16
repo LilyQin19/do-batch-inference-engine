@@ -146,6 +146,8 @@ async def submit_job(body: JobSubmitRequest, request: Request) -> JobSubmitRespo
         http_client=state.http_client,
         allow_private_webhooks=settings.batchengine_allow_private_webhooks,
         circuit_cooldown_s=settings.batchengine_circuit_cooldown_s,
+        retry_base_s=settings.batchengine_retry_base_s,
+        retry_cap_s=settings.batchengine_retry_cap_s,
     )
     state.runners[job_id] = runner
     state.tasks[job_id] = asyncio.create_task(_run_and_settle(runner, is_live, settings))

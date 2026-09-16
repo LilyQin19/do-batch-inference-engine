@@ -55,6 +55,18 @@ class WorkerContext:
     clock: Callable[[], float] = time.monotonic
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     rng: random.Random = field(default_factory=random.Random)
+    # Full-jitter backoff bounds (§6.2 defaults: 0.5s base, 30s cap). Made
+    # overridable -- not just hardcoded into the call site -- because a
+    # THROTTLED item can reach 8 attempts and a TRANSIENT item 5, and full
+    # jitter draws uniformly up to `min(cap, base * 2**attempt)` per retry;
+    # under real (non-test-double) asyncio.sleep, hypothesis- or
+    # chaos-config-driven test runs with many retry-heavy items can
+    # legitimately accumulate minutes of real wall-clock sleep this way.
+    # A CI run hung for this exact reason (see BUILD_LOG.md) with these left
+    # at their production defaults inside the HTTP-driven test suite, which
+    # -- unlike the pure-unit worker tests -- never substitutes a fake sleep.
+    retry_base_s: float = 0.5
+    retry_cap_s: float = 30.0
     abort_reason: list[str] = field(default_factory=list)  # single-slot box
     abort_class: list[FailureClass] = field(default_factory=list)  # single-slot box
 
@@ -247,7 +259,7 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
             return
 
         ctx.controller.record_retry_issued()
-        delay = full_jitter_delay(attempt, rng=ctx.rng)
+        delay = full_jitter_delay(attempt, base=ctx.retry_base_s, cap=ctx.retry_cap_s, rng=ctx.rng)
         await ctx.sleep(delay)
         # loop: retry the same item
 

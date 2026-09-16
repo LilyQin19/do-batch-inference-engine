@@ -80,6 +80,15 @@ async def app_client_factory(tmp_path: Path, monkeypatch):
     monkeypatch.setenv(
         "BATCHENGINE_CIRCUIT_COOLDOWN_S", "0.2"
     )  # keep chaos tests from waiting out a real 30s cooldown
+    # Full-jitter retry delays default to a 30s cap; a retry-heavy chaos
+    # config (many THROTTLED items each up to 8 real attempts) can
+    # accumulate real minutes of asyncio.sleep across an HTTP-driven test,
+    # which is suspected to have caused an intermittent multi-minute CI
+    # hang (see BUILD_LOG.md). Shrink both bounds so every retry sleep in
+    # the test suite is sub-100ms regardless of how many retries a chaos
+    # config happens to trigger.
+    monkeypatch.setenv("BATCHENGINE_RETRY_BASE_S", "0.001")
+    monkeypatch.setenv("BATCHENGINE_RETRY_CAP_S", "0.05")
 
     @asynccontextmanager
     async def _factory(**env_overrides: object) -> AsyncIterator[httpx.AsyncClient]:
