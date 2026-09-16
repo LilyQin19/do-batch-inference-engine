@@ -102,9 +102,9 @@ semantics, per-item granularity is the right trade; a system whose
 priority was coarse-grained resumability over a flaky, chunk-shaped
 upstream might reasonably choose the opposite.
 
-See `docs/architecture.md`'s Zone 3 section for where this plays out in
-the running system, and `tests/integration/test_conservation.py` for the
-per-item accounting this depends on.
+See `docs/design.md` §4.3's "Dispatch model" note for where this plays out
+in the running system, and `tests/integration/test_conservation.py` for
+the per-item accounting this depends on.
 
 ## Queue-as-backpressure vs. an unbounded work list
 

@@ -155,7 +155,7 @@ Full writeups (each naming the rejected alternative) are in
   chunking; a shared queue is self-balancing against straggler prompts
   where static chunks are not, at the cost of chunk-level checkpointing
   granularity. See "Non-goals" and "Delivery semantics" in
-  [`docs/architecture.md`](docs/architecture.md) for what this system does
+  [`docs/design.md`](docs/design.md) for what this system does
   and doesn't guarantee as a result.
 - **Token bucket, not just a semaphore** — a semaphore bounds concurrency;
   it says nothing about request *rate*, which is what the account quota
