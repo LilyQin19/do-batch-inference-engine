@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import socket
 
 import httpx
 import pytest
@@ -13,6 +14,17 @@ from batchengine.extensions.webhook import (
     sign_payload,
     validate_webhook_url,
 )
+
+
+def _fake_public_getaddrinfo(host: str, port: object) -> list[tuple[object, ...]]:
+    """Stands in for socket.getaddrinfo so "public hostname" tests never make
+    a real DNS query. A real query here is exactly what N5 ("zero network")
+    exists to forbid, and socket.getaddrinfo has no built-in timeout -- on a
+    runner with any DNS hiccup it can hang far longer than a normal test
+    ever would (this is suspected to have caused a >1hr CI hang on the
+    Python 3.12 matrix leg once; see BUILD_LOG.md).
+    """
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 0))]
 
 
 def test_sign_payload_is_deterministic_hmac_sha256() -> None:
@@ -46,13 +58,15 @@ def test_validate_allows_private_when_flag_set() -> None:
     validate_webhook_url("http://127.0.0.1:8000/hook", allow_private=True)
 
 
-def test_validate_allows_public_hostname() -> None:
+def test_validate_allows_public_hostname(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
     validate_webhook_url("https://example.com/hook")
 
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_deliver_webhook_succeeds_on_2xx() -> None:
+async def test_deliver_webhook_succeeds_on_2xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
     route = respx.post("https://example.com/hook").mock(return_value=httpx.Response(200))
     async with httpx.AsyncClient() as client:
         ok = await deliver_webhook(client, "https://example.com/hook", {"a": 1}, "secret")
@@ -64,7 +78,10 @@ async def test_deliver_webhook_succeeds_on_2xx() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_deliver_webhook_retries_then_gives_up_on_persistent_failure() -> None:
+async def test_deliver_webhook_retries_then_gives_up_on_persistent_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_public_getaddrinfo)
     route = respx.post("https://example.com/hook").mock(return_value=httpx.Response(500))
     async with httpx.AsyncClient() as client:
         ok = await deliver_webhook(client, "https://example.com/hook", {"a": 1}, "secret")

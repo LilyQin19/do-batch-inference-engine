@@ -64,7 +64,13 @@ async def app_client_factory(tmp_path: Path, monkeypatch):
     throttling) before the app's lifespan reads them. Shared across
     integration and property tests -- both drive the real HTTP surface.
     """
-    monkeypatch.delenv("DO_INFERENCE_KEY", raising=False)
+    # Explicitly set to empty, not delenv(): Settings reads env_file=".env"
+    # as a fallback source, so merely deleting the process env var still
+    # lets a real key in a real .env file leak into every test run that
+    # creates one (as happened once -- see BUILD_LOG.md). An explicitly-set
+    # env var outranks the dotenv file in pydantic-settings' source
+    # priority, so this is the one form that reliably wins either way.
+    monkeypatch.setenv("DO_INFERENCE_KEY", "")
     monkeypatch.setenv("BATCHENGINE_DB_PATH", str(tmp_path / "jobs.db"))
     monkeypatch.setenv("BATCHENGINE_RESULTS_DIR", str(tmp_path / "results"))
     monkeypatch.setenv("BATCHENGINE_SPEND_LEDGER_PATH", str(tmp_path / "ledger.json"))
