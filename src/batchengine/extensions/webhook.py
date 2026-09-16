@@ -45,7 +45,7 @@ def validate_webhook_url(url: str, allow_private: bool = False) -> None:
         infos = socket.getaddrinfo(parsed.hostname, None)
     except socket.gaierror as exc:
         raise WebhookSSRFError(f"could not resolve webhook host: {exc}") from exc
-    for family, _, _, _, sockaddr in infos:
+    for _family, _, _, _, sockaddr in infos:
         ip = ipaddress.ip_address(sockaddr[0])
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
             raise WebhookSSRFError(f"webhook host resolves to a disallowed address: {ip}")

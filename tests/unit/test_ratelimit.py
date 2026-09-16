@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import random
 
 import pytest
@@ -73,7 +72,9 @@ def test_aimd_decrease_on_throttle() -> None:
 def test_aimd_increase_after_success_streak() -> None:
     clock = FakeClock()
     bucket = TokenBucket(rate=10.0, capacity=10.0, clock=clock)
-    controller = AdaptiveController(bucket, min_rate=1.0, max_rate=20.0, clock=clock, success_streak_for_increase=5)
+    controller = AdaptiveController(
+        bucket, min_rate=1.0, max_rate=20.0, clock=clock, success_streak_for_increase=5
+    )
     for _ in range(5):
         controller.record_success(latency_s=1.0)
     assert bucket.rate == pytest.approx(10.5)
@@ -88,7 +89,9 @@ def test_cooldown_prevents_multiplicative_collapse_under_concurrent_429s() -> No
     """
     clock = FakeClock()
     bucket = TokenBucket(rate=10.0, capacity=10.0, clock=clock)
-    controller = AdaptiveController(bucket, min_rate=0.1, max_rate=20.0, clock=clock, cooldown_s=5.0)
+    controller = AdaptiveController(
+        bucket, min_rate=0.1, max_rate=20.0, clock=clock, cooldown_s=5.0
+    )
 
     for _ in range(20):
         controller.record_throttle()  # all "simultaneous" -- clock doesn't advance
@@ -105,8 +108,10 @@ def test_cooldown_prevents_multiplicative_collapse_under_concurrent_429s() -> No
 def test_rate_never_drops_below_min() -> None:
     clock = FakeClock()
     bucket = TokenBucket(rate=1.0, capacity=1.0, clock=clock)
-    controller = AdaptiveController(bucket, min_rate=0.5, max_rate=20.0, clock=clock, cooldown_s=0.0)
-    for i in range(10):
+    controller = AdaptiveController(
+        bucket, min_rate=0.5, max_rate=20.0, clock=clock, cooldown_s=0.0
+    )
+    for _ in range(10):
         clock.advance(1.0)
         controller.record_throttle()
     assert bucket.rate >= 0.5
@@ -115,7 +120,9 @@ def test_rate_never_drops_below_min() -> None:
 def test_rate_never_exceeds_max() -> None:
     clock = FakeClock()
     bucket = TokenBucket(rate=19.9, capacity=20.0, clock=clock)
-    controller = AdaptiveController(bucket, min_rate=1.0, max_rate=20.0, clock=clock, success_streak_for_increase=1)
+    controller = AdaptiveController(
+        bucket, min_rate=1.0, max_rate=20.0, clock=clock, success_streak_for_increase=1
+    )
     for _ in range(10):
         controller.record_success(latency_s=1.0)
     assert bucket.rate <= 20.0
@@ -149,7 +156,6 @@ async def test_reset_header_pause_then_jitter_resume() -> None:
 async def test_reset_header_jitter_spreads_workers() -> None:
     """Distinct rng seeds per worker should produce distinct resume offsets
     -- proof the thundering-herd jitter actually varies across workers."""
-    clock = FakeClock()
     epoch = 1000.0
 
     offsets = set()

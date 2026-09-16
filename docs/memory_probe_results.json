@@ -1,0 +1,38 @@
+[
+  {
+    "n": 1000,
+    "baseline_rss_mb": 36.7,
+    "peak_rss_mb": 37.5,
+    "final_rss_mb": 37.5,
+    "delta_mb": 0.8,
+    "elapsed_s": 0.2,
+    "throughput_rps": 4991.6
+  },
+  {
+    "n": 10000,
+    "baseline_rss_mb": 37.5,
+    "peak_rss_mb": 37.7,
+    "final_rss_mb": 37.7,
+    "delta_mb": 0.2,
+    "elapsed_s": 1.85,
+    "throughput_rps": 5410.2
+  },
+  {
+    "n": 100000,
+    "baseline_rss_mb": 37.7,
+    "peak_rss_mb": 38.0,
+    "final_rss_mb": 38.0,
+    "delta_mb": 0.3,
+    "elapsed_s": 37.98,
+    "throughput_rps": 2633.1
+  },
+  {
+    "n": 500000,
+    "baseline_rss_mb": 38.0,
+    "peak_rss_mb": 38.1,
+    "final_rss_mb": 38.1,
+    "delta_mb": 0.0,
+    "elapsed_s": 216.33,
+    "throughput_rps": 2311.3
+  }
+]

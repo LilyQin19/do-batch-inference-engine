@@ -54,11 +54,13 @@ class JobRunner:
         http_client: httpx.AsyncClient | None = None,
         webhook_secret: str = "",
         allow_private_webhooks: bool = False,
+        circuit_cooldown_s: float = 30.0,
     ) -> None:
         self.record = record
         self.provider = provider
         self.store = store
         self.rate_limit_rpm = rate_limit_rpm
+        self.circuit_cooldown_s = circuit_cooldown_s
         self.cancel_event = asyncio.Event()
         self._http_client = http_client
         self._webhook_secret = webhook_secret
@@ -78,9 +80,13 @@ class JobRunner:
         queue: asyncio.Queue[object] = asyncio.Queue(maxsize=concurrency * _QUEUE_MULTIPLIER)
         rate_rps = self.rate_limit_rpm / 60.0
         bucket = TokenBucket(rate=rate_rps, capacity=max(2.0, rate_rps))
-        controller = AdaptiveController(bucket=bucket, min_rate=max(0.05, rate_rps * 0.1), max_rate=rate_rps * 1.5)
-        circuit_breaker = CircuitBreaker()
-        retry_budget = RetryBudget(total_items=1)  # grown as items are ingested; see _ingest_and_dispatch
+        controller = AdaptiveController(
+            bucket=bucket, min_rate=max(0.05, rate_rps * 0.1), max_rate=rate_rps * 1.5
+        )
+        circuit_breaker = CircuitBreaker(cooldown_s=self.circuit_cooldown_s)
+        retry_budget = RetryBudget(
+            total_items=1
+        )  # grown as items are ingested; see _ingest_and_dispatch
 
         sink = ResultSink(record.result_path)
         await sink.start()
@@ -114,7 +120,8 @@ class JobRunner:
                         cap_usd=config.max_job_spend_usd,
                     )
                     worker_ctx.abort_reason.append(
-                        f"spend guard: cost ${cost_so_far:.4f} / projected ${projected:.4f} >= cap ${config.max_job_spend_usd}"
+                        f"spend guard: cost ${cost_so_far:.4f} / projected ${projected:.4f} "
+                        f">= cap ${config.max_job_spend_usd}"
                     )
                 abort_event.set()
 
@@ -138,7 +145,9 @@ class JobRunner:
         workers = [asyncio.create_task(worker_loop(worker_ctx)) for _ in range(concurrency)]
 
         try:
-            await self._ingest_and_dispatch(queue, retry_budget, record, abort_event, controller, circuit_breaker)
+            await self._ingest_and_dispatch(
+                queue, retry_budget, record, abort_event, controller, circuit_breaker
+            )
         finally:
             for _ in workers:
                 await queue.put(SHUTDOWN)
@@ -178,7 +187,7 @@ class JobRunner:
             return
         from batchengine.extensions.webhook import WebhookSSRFError, deliver_webhook
 
-        payload = {
+        payload: dict[str, object] = {
             "job_id": record.job_id,
             "status": record.status.value,
             "counts": dataclasses.asdict(record.counts),
@@ -211,7 +220,7 @@ class JobRunner:
 
     async def _ingest_and_dispatch(
         self,
-        queue: "asyncio.Queue[object]",
+        queue: asyncio.Queue[object],
         retry_budget: RetryBudget,
         record: JobRecord,
         abort_event: asyncio.Event,
@@ -229,7 +238,9 @@ class JobRunner:
                 retry_budget.total_items = record.counts.ingested
                 await queue.put(parsed)
                 if record.counts.ingested % _STATUS_PERSIST_EVERY == 0:
-                    record.backpressure = dataclasses.asdict(controller.snapshot(circuit_breaker.state))
+                    record.backpressure = dataclasses.asdict(
+                        controller.snapshot(circuit_breaker.state)
+                    )
                     record.backpressure["retry_budget_remaining"] = retry_budget.remaining
                     await self.store.save(record)
                 max_items = record.config.max_items

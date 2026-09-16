@@ -14,8 +14,8 @@ import asyncio
 import random
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 
 
 class TokenBucket:
@@ -24,7 +24,9 @@ class TokenBucket:
     frozen bucket, which time.time() would risk.
     """
 
-    def __init__(self, rate: float, capacity: float, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self, rate: float, capacity: float, clock: Callable[[], float] = time.monotonic
+    ) -> None:
         self.rate = rate
         self.capacity = capacity
         self._clock = clock
@@ -38,7 +40,7 @@ class TokenBucket:
         self._tokens = min(self.capacity, self._tokens + elapsed * self.rate)
         self._last_refill = now
 
-    async def acquire(self, sleep: Callable[[float], "asyncio.Future[None]"] | None = None) -> None:
+    async def acquire(self, sleep: Callable[[float], Awaitable[None]] | None = None) -> None:
         """Block until one token is available, then consume it."""
         _sleep = sleep or asyncio.sleep
         while True:
@@ -82,7 +84,7 @@ class AdaptiveController:
         success_streak_for_increase: int = 50,
         cooldown_s: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], "asyncio.Future[None]"] | None = None,
+        sleep: Callable[[float], Awaitable[None]] | None = None,
         rng: random.Random | None = None,
     ) -> None:
         self.bucket = bucket
@@ -128,7 +130,9 @@ class AdaptiveController:
     def record_retry_issued(self) -> None:
         self.retries_issued += 1
 
-    async def honor_reset_header(self, reset_epoch: float, now_epoch_fn: Callable[[], float] = time.time) -> None:
+    async def honor_reset_header(
+        self, reset_epoch: float, now_epoch_fn: Callable[[], float] = time.time
+    ) -> None:
         """Hard-pause until `reset_epoch`, then resume with per-worker jitter.
 
         `x-ratelimit-reset-requests` is a forward-refill projection shared by

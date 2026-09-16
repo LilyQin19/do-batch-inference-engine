@@ -6,26 +6,17 @@ per the "one shared client per process" rule (§13).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 import httpx
 from fastapi import FastAPI
 
 from batchengine.api.routes import router
-from batchengine.config import Settings, get_settings
-from batchengine.core.scheduler import JobRunner
+from batchengine.app_state import AppState
+from batchengine.config import get_settings
 from batchengine.observability.logging import configure_logging
 from batchengine.store.sqlite import SqliteJobStore
-
-
-class AppState:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-        self.http_client: httpx.AsyncClient | None = None
-        self.job_store: SqliteJobStore | None = None
-        self.runners: dict[str, JobRunner] = {}
-        self.tasks: dict[str, asyncio.Task[None]] = {}
 
 
 @asynccontextmanager

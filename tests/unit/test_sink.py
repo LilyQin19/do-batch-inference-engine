@@ -14,8 +14,12 @@ async def test_sink_appends_success_and_error_rows(tmp_path: Path) -> None:
     path = tmp_path / "results.jsonl"
     sink = ResultSink(path)
     await sink.start()
-    await sink.submit(RowResult(item_id="a", response_text="hi", usage=UsageDelta(1, 2), latency_s=0.1, attempt=1))
-    await sink.submit(RowError(item_id="b", failure_class=FailureClass.INVALID_INPUT, message="bad", attempt=1))
+    await sink.submit(
+        RowResult(item_id="a", response_text="hi", usage=UsageDelta(1, 2), latency_s=0.1, attempt=1)
+    )
+    await sink.submit(
+        RowError(item_id="b", failure_class=FailureClass.INVALID_INPUT, message="bad", attempt=1)
+    )
     await sink.close()
 
     lines = path.read_text().strip().splitlines()
@@ -32,7 +36,11 @@ async def test_sink_flushes_before_close_even_under_batch_threshold(tmp_path: Pa
     sink = ResultSink(path)
     await sink.start()
     for i in range(5):  # far below the 100-row flush batch
-        await sink.submit(RowResult(item_id=str(i), response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1))
+        await sink.submit(
+            RowResult(
+                item_id=str(i), response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1
+            )
+        )
     await sink.close()
     assert len(path.read_text().strip().splitlines()) == 5
 
@@ -42,9 +50,17 @@ async def test_replay_rebuilds_counts_from_existing_file(tmp_path: Path) -> None
     path = tmp_path / "results.jsonl"
     sink = ResultSink(path)
     await sink.start()
-    await sink.submit(RowResult(item_id="a", response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1))
-    await sink.submit(RowResult(item_id="b", response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1))
-    await sink.submit(RowError(item_id="c", failure_class=FailureClass.TRANSIENT_EXHAUSTED, message="x", attempt=5))
+    await sink.submit(
+        RowResult(item_id="a", response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1)
+    )
+    await sink.submit(
+        RowResult(item_id="b", response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1)
+    )
+    await sink.submit(
+        RowError(
+            item_id="c", failure_class=FailureClass.TRANSIENT_EXHAUSTED, message="x", attempt=5
+        )
+    )
     await sink.close()
 
     state = replay(path)
@@ -64,7 +80,9 @@ async def test_replay_tolerates_torn_last_line(tmp_path: Path) -> None:
     path = tmp_path / "results.jsonl"
     sink = ResultSink(path)
     await sink.start()
-    await sink.submit(RowResult(item_id="a", response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1))
+    await sink.submit(
+        RowResult(item_id="a", response_text="x", usage=UsageDelta(1, 1), latency_s=0.01, attempt=1)
+    )
     await sink.close()
     with open(path, "a", encoding="utf-8") as f:
         f.write('{"item_id": "torn", "status": "suc')  # simulate a crash mid-write

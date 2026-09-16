@@ -11,8 +11,8 @@ from __future__ import annotations
 import random
 import time
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from batchengine.providers.base import ProviderResponse, ProviderTransportError
 
@@ -29,6 +29,10 @@ class MockProviderConfig:
     # If set, calls beyond this rate in a rolling 60s window get a real 429
     # with correct x-ratelimit-* headers, simulating the account quota.
     hard_rpm_ceiling: int | None = None
+    # Rolling-window duration for hard_rpm_ceiling. Real quotas are 60s; a
+    # short window here lets tests observe throttle-then-recover behavior
+    # in well under a second of real time instead of a real minute.
+    window_s: float = 60.0
     # After this many total calls, every subsequent call returns `fatal_status`.
     # Used to test that fatal_auth/fatal_billing abort within a handful of
     # requests rather than after the whole batch is burned.
@@ -46,7 +50,12 @@ class MockProviderConfig:
 class MockProvider:
     """Implements InferenceProvider. See MockProviderConfig for knobs."""
 
-    def __init__(self, config: MockProviderConfig, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, config: MockProviderConfig, clock: Callable[[], float] = time.time) -> None:
+        # Uses wall-clock time (not monotonic) by default: the
+        # x-ratelimit-reset-requests header it emits is a Unix epoch
+        # (§1.3), and AdaptiveController.honor_reset_header compares that
+        # value against time.time() -- so the mock's clock must be on the
+        # same axis for reset-header pause tests to mean anything.
         self._cfg = config
         self._rng = random.Random(config.seed)
         self._clock = clock
@@ -54,7 +63,7 @@ class MockProvider:
         self._request_timestamps: deque[float] = deque()
 
     def _prune_window(self, now: float) -> None:
-        window_start = now - 60.0
+        window_start = now - self._cfg.window_s
         while self._request_timestamps and self._request_timestamps[0] < window_start:
             self._request_timestamps.popleft()
 
@@ -78,7 +87,7 @@ class MockProvider:
         if self._cfg.hard_rpm_ceiling is not None:
             self._prune_window(now)
             if len(self._request_timestamps) >= self._cfg.hard_rpm_ceiling:
-                reset_at = self._request_timestamps[0] + 60.0
+                reset_at = self._request_timestamps[0] + self._cfg.window_s
                 return ProviderResponse(
                     status_code=429,
                     text="mock: rate limit exceeded",
@@ -100,7 +109,9 @@ class MockProvider:
             )
 
         if self._rng.random() < self._cfg.p_500:
-            return ProviderResponse(status_code=500, text="mock: simulated server error", headers=self._headers())
+            return ProviderResponse(
+                status_code=500, text="mock: simulated server error", headers=self._headers()
+            )
 
         if self._rng.random() < self._cfg.p_400:
             return ProviderResponse(
@@ -126,7 +137,9 @@ class MockProvider:
         self._prune_window(now)
         return max(0, self._cfg.hard_rpm_ceiling - len(self._request_timestamps))
 
-    def _headers(self, remaining_requests: int = 999, reset_requests: float = 0.0) -> dict[str, str]:
+    def _headers(
+        self, remaining_requests: int = 999, reset_requests: float = 0.0
+    ) -> dict[str, str]:
         limit = self._cfg.hard_rpm_ceiling or 120
         return {
             "x-ratelimit-limit-requests": str(limit),

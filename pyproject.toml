@@ -24,6 +24,7 @@ dev = [
     "hypothesis>=6.112",
     "ruff>=0.6",
     "mypy>=1.11",
+    "psutil>=6.0",
 ]
 spaces = ["aioboto3>=13.1"]
 

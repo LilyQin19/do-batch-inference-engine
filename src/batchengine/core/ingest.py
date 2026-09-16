@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 
 import ijson
@@ -32,7 +32,9 @@ def _sniff_is_json_array(path: Path) -> bool:
 def _row_to_item(raw: object, offset: int) -> PromptItem | RowError:
     if not isinstance(raw, dict) or "prompt" not in raw or not isinstance(raw["prompt"], str):
         return RowError(
-            item_id=str(raw.get("id")) if isinstance(raw, dict) and "id" in raw else f"offset-{offset}",
+            item_id=str(raw.get("id"))
+            if isinstance(raw, dict) and "id" in raw
+            else f"offset-{offset}",
             failure_class=FailureClass.INVALID_INPUT,
             message="row missing a string 'prompt' field",
             attempt=1,
@@ -61,7 +63,7 @@ def iter_items_sync(path: str | Path) -> Iterator[PromptItem | RowError]:
                 yield _row_to_item(raw, offset)
                 offset += 1
     else:
-        with open(p, "r", encoding="utf-8") as f:
+        with open(p, encoding="utf-8") as f:
             for offset, line in enumerate(f):
                 line = line.strip()
                 if not line:
@@ -79,7 +81,7 @@ def iter_items_sync(path: str | Path) -> Iterator[PromptItem | RowError]:
                 yield _row_to_item(raw, offset)
 
 
-async def stream_items(path: str | Path) -> AsyncIterator[PromptItem | RowError]:
+async def stream_items(path: str | Path) -> AsyncGenerator[PromptItem | RowError, None]:
     """Async bridge over `iter_items_sync`. Runs the sync/blocking ijson
     parse in a worker thread and forwards results through a small bounded
     queue, so the event loop is never blocked on file I/O and the producer

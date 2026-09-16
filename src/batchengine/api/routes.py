@@ -8,7 +8,7 @@ import asyncio
 import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -17,13 +17,17 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from ulid import ULID
 
+from batchengine.app_state import AppState
+from batchengine.config import Settings
 from batchengine.core.models import JobConfig, JobRecord, JobStatus
 from batchengine.core.retry import RetryBudget
 from batchengine.core.scheduler import JobRunner, default_concurrency
 from batchengine.core.spend_ledger import load_total_spend
 from batchengine.observability.metrics import render_prometheus_text
+from batchengine.providers.base import InferenceProvider
 from batchengine.providers.digitalocean import DigitalOceanProvider
 from batchengine.providers.mock import MockProvider, MockProviderConfig
+from batchengine.store.sqlite import SqliteJobStore
 
 from .schemas import (
     JobBackpressureResponse,
@@ -40,8 +44,14 @@ log = structlog.get_logger()
 router = APIRouter()
 
 
-def _state(request: Request):
-    return request.app.state.app_state
+def _state(request: Request) -> AppState:
+    state: AppState = request.app.state.app_state
+    return state
+
+
+def _store(state: AppState) -> SqliteJobStore:
+    assert state.job_store is not None, "job_store is created in lifespan before any request"
+    return state.job_store
 
 
 def _iso(ts: float) -> str:
@@ -108,41 +118,51 @@ async def submit_job(body: JobSubmitRequest, request: Request) -> JobSubmitRespo
         max_job_spend_usd=settings.batchengine_max_job_spend_usd,
         max_items=max_items,
     )
-    record = JobRecord(job_id=job_id, config=config, status=JobStatus.QUEUED, result_path=result_path)
-    await state.job_store.create(record)
+    record = JobRecord(
+        job_id=job_id, config=config, status=JobStatus.QUEUED, result_path=result_path
+    )
+    await _store(state).create(record)
 
+    provider: InferenceProvider
     if is_live:
+        assert settings.do_inference_key  # narrowed by is_live above
+        assert state.http_client is not None
         provider = DigitalOceanProvider(
             client=state.http_client,
-            api_key=settings.do_inference_key,  # type: ignore[arg-type]
+            api_key=settings.do_inference_key,
             base_url=settings.do_inference_base_url,
             model_for_pricing=model,
         )
+    elif state.mock_provider_factory is not None:
+        provider = state.mock_provider_factory()
     else:
         provider = MockProvider(MockProviderConfig())
 
     runner = JobRunner(
         record=record,
         provider=provider,
-        store=state.job_store,
+        store=_store(state),
         rate_limit_rpm=settings.batchengine_rate_limit_rpm,
         http_client=state.http_client,
         allow_private_webhooks=settings.batchengine_allow_private_webhooks,
+        circuit_cooldown_s=settings.batchengine_circuit_cooldown_s,
     )
     state.runners[job_id] = runner
-    state.tasks[job_id] = asyncio.create_task(_run_and_settle(runner, provider, state, job_id, is_live, settings))
+    state.tasks[job_id] = asyncio.create_task(_run_and_settle(runner, is_live, settings))
 
     return JobSubmitResponse(job_id=job_id, status="queued", submitted_at=_iso(record.submitted_at))
 
 
-async def _run_and_settle(runner: JobRunner, provider, state, job_id: str, is_live: bool, settings) -> None:
+async def _run_and_settle(runner: JobRunner, is_live: bool, settings: Settings) -> None:
     try:
         await runner.run()
     finally:
         if is_live:
             from batchengine.core.spend_ledger import record_spend
 
-            record_spend(settings.batchengine_spend_ledger_path, runner.record.usage.estimated_cost_usd)
+            record_spend(
+                settings.batchengine_spend_ledger_path, runner.record.usage.estimated_cost_usd
+            )
 
 
 async def _get_record(request: Request, job_id: str) -> JobRecord:
@@ -150,7 +170,7 @@ async def _get_record(request: Request, job_id: str) -> JobRecord:
     runner = state.runners.get(job_id)
     if runner is not None:
         return runner.record
-    record = await state.job_store.get(job_id)
+    record = await _store(state).get(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
     return record
@@ -177,11 +197,14 @@ async def get_status(job_id: str, request: Request) -> JobStatusResponse:
         configured_max_rps=bp.get("configured_max_rps", settings.batchengine_rate_limit_rpm / 60.0),
         throttle_events_429=bp.get("throttle_events_429", 0),
         retries_issued=bp.get("retries_issued", 0),
-        retry_budget_remaining=bp.get("retry_budget_remaining", RetryBudget(total_items=max(1, counts.ingested)).limit),
+        retry_budget_remaining=bp.get(
+            "retry_budget_remaining", RetryBudget(total_items=max(1, counts.ingested)).limit
+        ),
         circuit_state=bp.get("circuit_state", "closed"),
         observed_mean_latency_s=bp.get("observed_mean_latency_s", 0.0),
         littles_law_optimal_concurrency=bp.get(
-            "littles_law_optimal_concurrency", record.config.concurrency or default_concurrency(settings.batchengine_rate_limit_rpm)
+            "littles_law_optimal_concurrency",
+            record.config.concurrency or default_concurrency(settings.batchengine_rate_limit_rpm),
         ),
     )
 
@@ -218,10 +241,13 @@ async def cancel_job(job_id: str, request: Request) -> JobCancelResponse:
     state = _state(request)
     runner = state.runners.get(job_id)
     if runner is None:
-        record = await state.job_store.get(job_id)
+        record = await _store(state).get(job_id)
         if record is None:
             raise HTTPException(status_code=404, detail=f"unknown job_id: {job_id}")
-        raise HTTPException(status_code=409, detail="job is not active in this process (already finished or process restarted)")
+        raise HTTPException(
+            status_code=409,
+            detail="job is not active in this process (already finished or process restarted)",
+        )
     runner.cancel()
     return JobCancelResponse(job_id=job_id, status="cancelling")
 
@@ -236,7 +262,10 @@ async def download_job(
 ) -> StreamingResponse:
     record = await _get_record(request, job_id)
     if record.status in (JobStatus.QUEUED, JobStatus.RUNNING) and not partial:
-        raise HTTPException(status_code=409, detail="job is still running; retry with ?partial=true to stream what's done so far")
+        raise HTTPException(
+            status_code=409,
+            detail="job is still running; retry with ?partial=true to stream what's done so far",
+        )
 
     path = Path(record.result_path)
 
@@ -244,7 +273,7 @@ async def download_job(
         if not path.exists():
             return
         wanted_status = {"success": "success", "errors": "error"}.get(include)
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for raw_line in f:
                 line = raw_line.rstrip("\n")
                 if not line:
@@ -260,7 +289,7 @@ async def download_job(
 
     if format == "json":
 
-        async def gen_json():
+        async def gen_json() -> AsyncIterator[str]:
             first = True
             yield "["
             for line in lines():
@@ -270,7 +299,7 @@ async def download_job(
 
         return StreamingResponse(gen_json(), media_type="application/json")
 
-    async def gen_ndjson():
+    async def gen_ndjson() -> AsyncIterator[str]:
         for line in lines():
             yield line + "\n"
 
@@ -280,11 +309,13 @@ async def download_job(
 @router.get("/metrics")
 async def metrics(request: Request) -> PlainTextResponse:
     state = _state(request)
-    ids = set(await state.job_store.list_ids()) | set(state.runners.keys())
+    ids = set(await _store(state).list_ids()) | set(state.runners.keys())
     records = []
     for job_id in ids:
         runner = state.runners.get(job_id)
-        record = runner.record if runner is not None else await state.job_store.get(job_id)
+        record = runner.record if runner is not None else await _store(state).get(job_id)
         if record is not None:
             records.append(record)
-    return PlainTextResponse(render_prometheus_text(records), media_type="text/plain; version=0.0.4")
+    return PlainTextResponse(
+        render_prometheus_text(records), media_type="text/plain; version=0.0.4"
+    )

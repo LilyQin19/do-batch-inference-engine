@@ -45,7 +45,7 @@ def render_prometheus_text(records: list[JobRecord]) -> str:
 
 def _value_for(metric: str, record: JobRecord) -> float:
     bp = record.backpressure or {}
-    return {
+    values: dict[str, float] = {
         "batchengine_job_ingested_total": record.counts.ingested,
         "batchengine_job_succeeded_total": record.counts.succeeded,
         "batchengine_job_failed_total": record.counts.failed,
@@ -54,4 +54,5 @@ def _value_for(metric: str, record: JobRecord) -> float:
         "batchengine_job_retries_issued_total": bp.get("retries_issued", 0),
         "batchengine_job_current_rate_limit_rps": bp.get("current_rate_limit_rps", 0.0),
         "batchengine_job_estimated_cost_usd": record.usage.estimated_cost_usd,
-    }[metric]
+    }
+    return float(values[metric])

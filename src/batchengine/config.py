@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     batchengine_model: str = "openai-gpt-oss-20b"
     batchengine_max_tokens: int = 128
     batchengine_rate_limit_rpm: int = 120
+    # §6.2 default is 30s. Overridable so the test suite can shrink it --
+    # the breaker's *logic* is exercised with a fake clock in
+    # tests/unit/test_retry.py; this only controls how long a real,
+    # HTTP-driven test has to wait out an open breaker in wall-clock time.
+    batchengine_circuit_cooldown_s: float = 30.0
 
     batchengine_max_job_spend_usd: float = 0.25
     batchengine_max_total_spend_usd: float = 1.00

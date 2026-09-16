@@ -32,9 +32,12 @@ _STATUS_TABLE: dict[int, tuple[FailureClass, int]] = {
 }
 
 _DEFAULT_MAX_ATTEMPTS = 5
+_module_rng = random.Random()
 
 
-def classify(response: ProviderResponse | None, exc: Exception | None = None) -> tuple[FailureClass, int]:
+def classify(
+    response: ProviderResponse | None, exc: Exception | None = None
+) -> tuple[FailureClass, int]:
     """Map a provider outcome to (FailureClass, max_attempts_for_this_class).
 
     Exactly one of `response`/`exc` should be given: `exc` for a transport
@@ -61,7 +64,9 @@ def classify(response: ProviderResponse | None, exc: Exception | None = None) ->
     return FailureClass.TRANSIENT, _DEFAULT_MAX_ATTEMPTS
 
 
-def full_jitter_delay(attempt: int, base: float = 0.5, cap: float = 30.0, rng: random.Random | None = None) -> float:
+def full_jitter_delay(
+    attempt: int, base: float = 0.5, cap: float = 30.0, rng: random.Random | None = None
+) -> float:
     """AWS "full jitter": sleep = uniform(0, min(cap, base * 2**attempt)).
 
     Plain exponential backoff keeps a retry cohort's wake-up times
@@ -71,9 +76,9 @@ def full_jitter_delay(attempt: int, base: float = 0.5, cap: float = 30.0, rng: r
     envelope, so the *first* retry already spreads the cohort out, and it
     stays spread on every later wave instead of re-synchronizing.
     """
-    rng = rng or random
+    active_rng = rng if rng is not None else _module_rng
     ceiling = min(cap, base * (2**attempt))
-    return rng.uniform(0, ceiling)
+    return active_rng.uniform(0, ceiling)
 
 
 @dataclass(slots=True)

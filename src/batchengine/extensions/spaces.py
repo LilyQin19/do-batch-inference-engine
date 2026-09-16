@@ -10,6 +10,7 @@ never require it.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -36,7 +37,7 @@ class SpacesCheckpointer:
         self._parts: list[dict[str, object]] = []
         self._part_number = 1
 
-    async def _client(self):  # pragma: no cover -- requires aioboto3 + real credentials
+    async def _client(self) -> Any:  # pragma: no cover -- requires aioboto3 + real credentials
         import aioboto3
 
         session = aioboto3.Session()

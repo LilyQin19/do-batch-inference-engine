@@ -10,8 +10,8 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
 
 import structlog
 
@@ -39,7 +39,7 @@ SHUTDOWN = object()
 @dataclass(slots=True)
 class WorkerContext:
     job_id: str
-    queue: "asyncio.Queue[object]"
+    queue: asyncio.Queue[object]
     provider: InferenceProvider
     controller: AdaptiveController
     circuit_breaker: CircuitBreaker
@@ -53,7 +53,7 @@ class WorkerContext:
     cancel_event: asyncio.Event
     on_spend_check: Callable[[], Awaitable[None]]
     clock: Callable[[], float] = time.monotonic
-    sleep: Callable[[float], "Awaitable[None]"] = asyncio.sleep
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     rng: random.Random = field(default_factory=random.Random)
     abort_reason: list[str] = field(default_factory=list)  # single-slot box
     abort_class: list[FailureClass] = field(default_factory=list)  # single-slot box
@@ -63,9 +63,22 @@ def _bump_error_class(ctx: WorkerContext, failure_class: FailureClass) -> None:
     ctx.errors_by_class[failure_class.value] = ctx.errors_by_class.get(failure_class.value, 0) + 1
 
 
-async def _emit_error(ctx: WorkerContext, item_id: str, failure_class: FailureClass, message: str, attempt: int, http_status: int | None) -> None:
+async def _emit_error(
+    ctx: WorkerContext,
+    item_id: str,
+    failure_class: FailureClass,
+    message: str,
+    attempt: int,
+    http_status: int | None,
+) -> None:
     await ctx.sink.submit(
-        RowError(item_id=item_id, failure_class=failure_class, message=message, attempt=attempt, http_status=http_status)
+        RowError(
+            item_id=item_id,
+            failure_class=failure_class,
+            message=message,
+            attempt=attempt,
+            http_status=http_status,
+        )
     )
     ctx.counts.failed += 1
     ctx.counts.pending -= 1
@@ -81,7 +94,14 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
     attempt = 0
     while True:
         if ctx.cancel_event.is_set():
-            await _emit_error(ctx, item.id, FailureClass.CANCELLED, "job cancelled before dispatch", attempt or 1, None)
+            await _emit_error(
+                ctx,
+                item.id,
+                FailureClass.CANCELLED,
+                "job cancelled before dispatch",
+                attempt or 1,
+                None,
+            )
             return
 
         if ctx.abort_event.is_set():
@@ -101,7 +121,9 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
         response = None
         exc: Exception | None = None
         try:
-            response = await ctx.provider.complete(item.prompt, ctx.config.model, ctx.config.max_tokens)
+            response = await ctx.provider.complete(
+                item.prompt, ctx.config.model, ctx.config.max_tokens
+            )
         except ProviderTransportError as e:
             exc = e
         latency = ctx.clock() - start
@@ -109,17 +131,29 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
 
         failure_class, max_attempts = classify(response, exc)
 
-        breaker_failure = failure_class in (FailureClass.TRANSIENT, FailureClass.FATAL_AUTH, FailureClass.FATAL_BILLING)
+        breaker_failure = failure_class in (
+            FailureClass.TRANSIENT,
+            FailureClass.FATAL_AUTH,
+            FailureClass.FATAL_BILLING,
+        )
         ctx.circuit_breaker.record(breaker_failure)
 
         if failure_class == FailureClass.SUCCESS:
             assert response is not None
             ctx.controller.record_success(latency)
-            usage = UsageDelta(input_tokens=response.input_tokens, output_tokens=response.output_tokens)
+            usage = UsageDelta(
+                input_tokens=response.input_tokens, output_tokens=response.output_tokens
+            )
             ctx.usage.input_tokens += usage.input_tokens
             ctx.usage.output_tokens += usage.output_tokens
             await ctx.sink.submit(
-                RowResult(item_id=item.id, response_text=response.text, usage=usage, latency_s=latency, attempt=attempt)
+                RowResult(
+                    item_id=item.id,
+                    response_text=response.text,
+                    usage=usage,
+                    latency_s=latency,
+                    attempt=attempt,
+                )
             )
             ctx.counts.succeeded += 1
             ctx.counts.pending -= 1
@@ -132,13 +166,22 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
             ctx.abort_reason.append(f"{failure_class.value} (HTTP {http_status})")
             ctx.abort_class.append(failure_class)
             ctx.abort_event.set()
-            log.error("job.fatal_abort", job_id=ctx.job_id, failure_class=failure_class.value, http_status=http_status)
-            await _emit_error(ctx, item.id, failure_class, f"fatal: HTTP {http_status}", attempt, http_status)
+            log.error(
+                "job.fatal_abort",
+                job_id=ctx.job_id,
+                failure_class=failure_class.value,
+                http_status=http_status,
+            )
+            await _emit_error(
+                ctx, item.id, failure_class, f"fatal: HTTP {http_status}", attempt, http_status
+            )
             return
 
         if failure_class == FailureClass.THROTTLED:
             ctx.controller.record_throttle()
-            reset_header = (response.headers or {}).get("x-ratelimit-reset-requests") if response else None
+            reset_header = (
+                (response.headers or {}).get("x-ratelimit-reset-requests") if response else None
+            )
             if reset_header:
                 try:
                     reset_epoch = float(reset_header)
@@ -153,11 +196,20 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
                 if failure_class in (FailureClass.THROTTLED, FailureClass.TRANSIENT)
                 else failure_class
             )
-            await _emit_error(ctx, item.id, final_class, "max attempts exhausted", attempt, http_status)
+            await _emit_error(
+                ctx, item.id, final_class, "max attempts exhausted", attempt, http_status
+            )
             return
 
         if not ctx.retry_budget.try_consume():
-            await _emit_error(ctx, item.id, FailureClass.TRANSIENT_EXHAUSTED, "retry budget exhausted", attempt, http_status)
+            await _emit_error(
+                ctx,
+                item.id,
+                FailureClass.TRANSIENT_EXHAUSTED,
+                "retry budget exhausted",
+                attempt,
+                http_status,
+            )
             return
 
         ctx.controller.record_retry_issued()

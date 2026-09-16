@@ -42,7 +42,9 @@ class DigitalOceanProvider:
     completions endpoint DigitalOcean Serverless Inference exposes.
     """
 
-    def __init__(self, client: httpx.AsyncClient, api_key: str, base_url: str, model_for_pricing: str) -> None:
+    def __init__(
+        self, client: httpx.AsyncClient, api_key: str, base_url: str, model_for_pricing: str
+    ) -> None:
         self._client = client
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")

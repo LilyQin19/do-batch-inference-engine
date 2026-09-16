@@ -25,7 +25,9 @@ _CASES = [
 
 
 @pytest.mark.parametrize("status,expected_class,expected_max_attempts", _CASES)
-def test_classify_http_status_table(status: int, expected_class: FailureClass, expected_max_attempts: int) -> None:
+def test_classify_http_status_table(
+    status: int, expected_class: FailureClass, expected_max_attempts: int
+) -> None:
     response = ProviderResponse(status_code=status)
     failure_class, max_attempts = classify(response)
     assert failure_class == expected_class

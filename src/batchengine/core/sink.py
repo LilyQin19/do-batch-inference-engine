@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TextIO
@@ -18,6 +19,7 @@ from batchengine.core.models import RowError, RowResult
 
 _FLUSH_EVERY_ROWS = 100
 _FLUSH_EVERY_SECONDS = 2.0
+_TIMEOUT = object()
 
 
 def _result_line(result: RowResult) -> dict[str, object]:
@@ -60,7 +62,7 @@ def replay(path: str | Path) -> ReplayState:
     state = ReplayState(seen_item_ids=set())
     if not p.exists():
         return state
-    with open(p, "r", encoding="utf-8") as f:
+    with open(p, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -84,7 +86,7 @@ class ResultSink:
     concurrent workers never race on the file.
     """
 
-    def __init__(self, path: str | Path, clock: "type[time]" = time) -> None:
+    def __init__(self, path: str | Path, clock: Callable[[], float] = time.monotonic) -> None:
         self.path = Path(path)
         self._queue: asyncio.Queue[RowResult | RowError | None] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
@@ -111,24 +113,28 @@ class ResultSink:
     async def _run(self) -> None:
         assert self._fh is not None
         unflushed = 0
-        last_flush = self._clock.monotonic()
+        last_flush = self._clock()
         while True:
+            item: object
             try:
                 item = await asyncio.wait_for(self._queue.get(), timeout=_FLUSH_EVERY_SECONDS)
-            except asyncio.TimeoutError:
-                item = "TIMEOUT"  # type: ignore[assignment]
+            except TimeoutError:
+                item = _TIMEOUT
 
             if item is None:
                 self._flush()
                 return
 
-            if item != "TIMEOUT":
+            if item is not _TIMEOUT:
+                assert isinstance(item, (RowResult, RowError))
                 line = _result_line(item) if isinstance(item, RowResult) else _error_line(item)
                 self._fh.write(json.dumps(line) + "\n")
                 unflushed += 1
 
-            now = self._clock.monotonic()
-            if unflushed >= _FLUSH_EVERY_ROWS or (unflushed > 0 and now - last_flush >= _FLUSH_EVERY_SECONDS):
+            now = self._clock()
+            if unflushed >= _FLUSH_EVERY_ROWS or (
+                unflushed > 0 and now - last_flush >= _FLUSH_EVERY_SECONDS
+            ):
                 self._flush()
                 unflushed = 0
                 last_flush = now

@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
-class FailureClass(str, enum.Enum):
+class FailureClass(enum.StrEnum):
     """The §6.2 taxonomy. Every non-success outcome maps to exactly one of these."""
 
     SUCCESS = "success"
@@ -34,7 +34,7 @@ class FailureClass(str, enum.Enum):
         return self in (FailureClass.THROTTLED, FailureClass.TRANSIENT)
 
 
-class JobStatus(str, enum.Enum):
+class JobStatus(enum.StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     SUCCEEDED = "succeeded"

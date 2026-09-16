@@ -1,0 +1,36 @@
+flowchart TD
+    subgraph Z1["Zone 1: Ingestion track"]
+        A["POST /job<br/>stat-only validation, &lt;50ms"] --> B["ijson streaming generator<br/>(core/ingest.py)<br/>never json.load()"]
+    end
+
+    subgraph Z2["Zone 2: Backpressure throttling layer"]
+        B --> C["asyncio.Queue(maxsize=concurrency x 4)<br/>BACKPRESSURE #1: producer blocks when full"]
+        C --> D["TokenBucket + AIMD AdaptiveController<br/>(core/ratelimit.py)<br/>BACKPRESSURE #2: paces against 120 RPM quota"]
+    end
+
+    subgraph Z3["Zone 3: Scatter pool segmentation"]
+        D --> E1["Worker 1"]
+        D --> E2["Worker 2"]
+        D --> E3["Worker N"]
+        E1 --> F["shared httpx.AsyncClient<br/>(pooled, HTTP/2)"]
+        E2 --> F
+        E3 --> F
+        F --> P["DigitalOcean Serverless<br/>Inference (or MockProvider)"]
+        P -.->|"200 / 429 / 5xx / 4xx"| G["classify() (core/retry.py)<br/>success / throttled / transient /<br/>invalid_input / fatal_auth / fatal_billing"]
+        G -->|retry, full jitter| D
+        G -->|fatal| H["abort_event.set()<br/>drain in-flight, stop ingest"]
+    end
+
+    subgraph Z4["Zone 4: Gather collection layer"]
+        G -->|terminal outcome| I["ResultSink: single writer task<br/>append-only JSONL, fsync every 100 rows/2s<br/>counters only, never a results list"]
+        I --> J[("results/{job_id}.jsonl")]
+        I --> K["JobStore (memory + SQLite)<br/>counts, rates, cost, concurrency"]
+    end
+
+    K --> L["GET /job/{id}/status"]
+    J --> M["GET /job/{id}/download<br/>StreamingResponse"]
+
+    style Z1 fill:#1f6feb22,stroke:#1f6feb
+    style Z2 fill:#d2992222,stroke:#d29922
+    style Z3 fill:#8957e522,stroke:#8957e5
+    style Z4 fill:#2ea04322,stroke:#2ea043
