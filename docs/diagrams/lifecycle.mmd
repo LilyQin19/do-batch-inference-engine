@@ -1,0 +1,56 @@
+stateDiagram-v2
+    [*] --> queued: POST /job creates JobRecord
+
+    queued --> running: JobRunner.run() begins
+
+    running --> running: every 25th ingested item (periodic snapshot)
+
+    running --> succeeded: ingestion finished, failed == 0
+    running --> partial: ingestion finished, 0 < failed < ingested
+    running --> failed: ingestion finished all-failed, OR abort_event set
+    running --> cancelled: cancel_event set via POST /job/id/cancel
+
+    succeeded --> [*]: final store.save(); webhook fired if configured
+    partial --> [*]: final store.save(); webhook fired if configured
+    failed --> [*]: final store.save(); abort_reason set if aborted
+    cancelled --> [*]: final store.save(); queued items drained to CANCELLED first
+
+    note right of queued
+        Writer: api/routes.py::submit_job
+        Durable: JobStore.create() (SQLite),
+        committed before the 202 response
+        is returned to the caller.
+    end note
+
+    note right of running
+        Writer (entry): core/scheduler.py::JobRunner.run
+        Durable (entry): store.save() at the top
+        of run(), before ingestion starts.
+
+        Writer (periodic self-loop): _ingest_and_dispatch
+        Durable (periodic): a counts/backpressure
+        snapshot every 25 ingested items -- NOT
+        every single item. A crash between snapshots
+        loses that many items worth of live-status
+        precision (the JSONL sink itself, and hence
+        the conservation invariant, is unaffected --
+        see "Delivery semantics" in architecture.md).
+    end note
+
+    note right of failed
+        abort_event (fatal_auth, fatal_billing, or
+        the spend guard) is a *reason*, not a distinct
+        JobStatus -- every abort path resolves to this
+        same failed state. The reason is only visible
+        in JobRecord.abort_reason, never in status
+        itself. There is no separate "aborted" status
+        value in the code (JobStatus enum is exactly
+        queued / running / succeeded / partial /
+        failed / cancelled).
+        Writer: JobRunner._final_status
+    end note
+
+    note right of cancelled
+        Writer: JobRunner.cancel() sets cancel_event;
+        _final_status reads it once the run loop exits.
+    end note

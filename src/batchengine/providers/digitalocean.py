@@ -24,17 +24,22 @@ _RATE_LIMIT_HEADERS = (
     "x-ratelimit-reset-tokens-per-day",
 )
 
-# $/1M tokens, serverless catalog as researched 2026-09-15 (§1.1 of instructions.md).
-# Kept here (not hardcoded into cost math) so README's cost table and the
-# scheduler's spend guard read from one source.
+# $/1M tokens, serverless catalog as researched 2026-09-15 (§1.1 of
+# instructions.md) and revised 2026-09-16 against the live model-access-key
+# endpoint (docs/model-selection.md) -- `openai-gpt-oss-20b` turned out to be
+# a reasoning model that returns null `content` at a 128-token budget, and
+# `ministral-3-14B` was a research-stage guess at a catalog id that live
+# verification corrected to `mistral-3-14B`. Kept here (not hardcoded into
+# cost math) so README's cost table and the scheduler's spend guard read
+# from one source.
 MODEL_PRICING: dict[str, tuple[float, float]] = {
+    "mistral-3-14B": (0.20, 0.20),
     "openai-gpt-oss-20b": (0.05, 0.45),
     "openai-gpt-oss-120b": (0.06, 0.39),
     "gemma-4-31B-it": (0.18, 0.50),
     "llama-4-maverick": (0.20, 0.696),
-    "ministral-3-14B": (0.20, 0.20),
 }
-_DEFAULT_PRICING = MODEL_PRICING["openai-gpt-oss-20b"]
+_DEFAULT_PRICING = MODEL_PRICING["mistral-3-14B"]
 
 
 class DigitalOceanProvider:
@@ -72,6 +77,15 @@ class DigitalOceanProvider:
         try:
             body = resp.json()
             text = body["choices"][0]["message"]["content"]
+            if not isinstance(text, str):
+                # Reasoning models (e.g. openai-gpt-oss-20b) can return
+                # `content: null` with the token budget spent entirely on a
+                # `reasoning_content` field instead, particularly at a low
+                # max_tokens (see docs/model-selection.md). Treating this as
+                # malformed -- rather than passing `None` through as if it
+                # were a normal completion -- is what keeps a silently
+                # empty/wrong result from being recorded as a success.
+                return ProviderResponse(status_code=200, malformed=True, headers=headers)
             usage = body.get("usage", {})
             input_tokens = int(usage.get("prompt_tokens", 0))
             output_tokens = int(usage.get("completion_tokens", 0))

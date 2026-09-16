@@ -105,7 +105,7 @@ account's request rate, not this engine's implementation.
 
 | Scale | Right answer | Why | Cost / constraint |
 |---|---|---|---|
-| Up to a few thousand items, ad hoc | This engine, serverless inference | Fits comfortably inside Tier 1 RPM; no setup cost | ~8 min per 1,000 items, ~$0.065/1,000 at `openai-gpt-oss-20b`/`max_tokens=128` |
+| Up to a few thousand items, ad hoc | This engine, serverless inference | Fits comfortably inside Tier 1 RPM; no setup cost | ~8 min per 1,000 items, ~$0.07/1,000 at `mistral-3-14B`/`max_tokens=128` |
 | Tens of thousands, batchable, not latency-sensitive | **DigitalOcean Batch Inference** | Separate quota pool from real-time traffic (doesn't degrade a customer's production p99), up to 50% discount, 50,000 requests/file, 200MB max file, 24h completion window | Requires accepting a completion window instead of synchronous polling |
 | Sustained high volume, latency-sensitive | **Dedicated Inference endpoint** | Removes the shared RPM ceiling entirely — you own the GPU | From $2.59/hr (AMD MI300X); only economical above a utilization threshold |
 | Sustained high volume on serverless specifically | **Quota tier increase** | Tier 5 reaches 4,500 RPM — 500K items drops from ~69h to **~1.9h** | Requires an account-level request/approval to DigitalOcean; no code change |

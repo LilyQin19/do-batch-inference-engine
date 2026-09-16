@@ -64,6 +64,48 @@ Waking all of them at the identical instant just recreates the exact
 throttle they were pausing for, one instant later. This mirrors the full
 jitter reasoning above and is called out in `core/ratelimit.py::AdaptiveController.honor_reset_header`.
 
+## Per-item dispatch through a shared queue vs. static chunk partitioning
+
+**Chosen:** every prompt is dispatched individually through one shared
+`asyncio.Queue`, consumed by a fixed pool of worker tasks (§3, Zone 3). No
+item is ever assigned to a specific worker in advance.
+
+**Rejected:** the literal reading of the project statement, which says to
+"partition the 1,000 prompt records into concurrent execution chunks" --
+i.e. split the input into N contiguous chunks up front and hand one chunk
+to each of N workers to process sequentially. This is a deliberate,
+acknowledged deviation from the spec's literal wording, not an oversight.
+
+**Why:** static chunking suffers from straggler imbalance. If prompt length,
+`max_tokens`, or upstream latency varies across the batch (they always do
+in practice), a chunk that happens to contain the slow prompts holds the
+job open long after every other worker has drained its chunk and gone
+idle -- the job's wall-clock time is bounded by its *worst* chunk, not by
+the average. A shared queue is self-balancing: a worker that finishes fast
+immediately pulls the next available item regardless of which "chunk" it
+would have belonged to, so the whole pool drains at roughly the same rate
+work actually completes -- this is exactly the work-stealing pattern that
+avoids the straggler problem, achieved here for free by not partitioning
+in the first place rather than by adding an explicit steal step.
+
+**Honest tradeoff, not just a win:** chunking has a real advantage this
+design gives up. A chunk is a natural checkpoint unit -- "chunk 3 of 10 is
+done" is a simple, coarse-grained resumption point, and a chunk that fails
+outright can be retried as a whole unit with clear boundaries. The shared
+queue instead pushes checkpointing and retry down to per-item granularity
+(the JSONL sink's replay-on-restart, §6.4, and per-item retry in
+`core/worker.py`), which is finer-grained and arguably more precise, but
+it means there's no single artifact that answers "how far did chunk 3
+get" -- only "which item ids have terminal outcomes so far." For a system
+whose top-priority requirement (§0) is flow control and per-item failure
+semantics, per-item granularity is the right trade; a system whose
+priority was coarse-grained resumability over a flaky, chunk-shaped
+upstream might reasonably choose the opposite.
+
+See `docs/architecture.md`'s Zone 3 section for where this plays out in
+the running system, and `tests/integration/test_conservation.py` for the
+per-item accounting this depends on.
+
 ## Queue-as-backpressure vs. an unbounded work list
 
 **Chosen:** `asyncio.Queue(maxsize=concurrency × 4)` between ingestion and
@@ -130,3 +172,23 @@ caller's honesty, and the request-path validation is stat-only (existence/
 readability/size — never parses the file to count rows). Capping ingestion
 itself, inside the scheduler, is the one place that's true regardless of
 what the caller asked for.
+
+## Default model: `mistral-3-14B`, not the cheapest-on-paper option
+
+**Chosen:** `mistral-3-14B` as `BATCHENGINE_MODEL`'s default.
+
+**Rejected:** `openai-gpt-oss-20b`, despite it pricing out cheaper per
+token on the serverless catalog.
+
+**Why:** verified live against the model-access-key endpoint,
+`openai-gpt-oss-20b` is a reasoning model — at this service's default
+`max_tokens=128`, the entire token budget goes to a `reasoning_content`
+field and the actual `content` field comes back `null`. Cheaper-per-token
+pricing on a model that returns no usable output at the budget you're
+actually paying for isn't actually cheaper. Full research trail,
+including the live-verified pricing/token-count table and the correction
+of `ministral-3-14B` (a research-stage guess) to the catalog's actual
+`mistral-3-14B`, is in `docs/model-selection.md`. `providers/digitalocean.py`
+now also treats non-string `content` as a malformed response rather than
+passing `None` through as a false success, since that's the concrete bug
+this finding would otherwise have caused.

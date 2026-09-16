@@ -54,12 +54,23 @@ In short: `ijson` streams the input row by row into a bounded
 the account quota independent of worker count, N workers classify and
 retry against the §6.2 failure taxonomy, and a single writer appends
 results to JSONL while keeping only counters in memory.
+`docs/architecture.md` also includes a job-lifecycle state diagram, an
+end-to-end single-item sequence diagram, an explicit "Delivery semantics"
+section (at-least-once, not exactly-once — read this before assuming what
+happens on a crash), and a "Non-goals" section.
 
 ## 4. Design decisions
 
 Full writeups (each naming the rejected alternative) are in
 [`docs/decisions.md`](docs/decisions.md). Summary:
 
+- **Per-item dispatch through a shared queue, not static chunk
+  partitioning** — the project statement's literal wording asks for
+  chunking; a shared queue is self-balancing against straggler prompts
+  where static chunks are not, at the cost of chunk-level checkpointing
+  granularity. See "Non-goals" and "Delivery semantics" in
+  [`docs/architecture.md`](docs/architecture.md) for what this system does
+  and doesn't guarantee as a result.
 - **Token bucket, not just a semaphore** — a semaphore bounds concurrency;
   it says nothing about request *rate*, which is what the account quota
   actually limits.
@@ -116,16 +127,26 @@ Full analysis in [`docs/scaling.md`](docs/scaling.md). Headlines:
 
 ## 7. Product findings
 
-Verified against DigitalOcean's live documentation and control panel
-(2026-09-15):
+Verified against DigitalOcean's live documentation, control panel, and
+(2026-09-16) the live model-access-key endpoint itself — see
+[`docs/model-selection.md`](docs/model-selection.md) for the full record:
 
 - **The project statement's model, `meta-llama-3-8b-instruct`, is not
   available on Serverless Inference** — DigitalOcean's catalog lists
-  `llama3-8b-instruct` as dedicated-inference-only. This service defaults to
-  `openai-gpt-oss-20b` instead (cheapest serverless option) and makes the
-  model fully configurable via `BATCHENGINE_MODEL` / the `model` request
-  field. See the cost table below for the full serverless catalog
-  comparison.
+  `llama3-8b-instruct` as dedicated-inference-only.
+- **The cheapest-on-paper serverless option, `openai-gpt-oss-20b`, turned
+  out not to be usable at this service's default `max_tokens=128`.** It's
+  a reasoning model: queried live, it returns `content: null` with the
+  entire token budget spent on a `reasoning_content` field instead. This
+  service now defaults to `mistral-3-14B` — the cheapest model that
+  returns actual usable content at this budget — and treats non-string
+  `content` as a malformed response rather than passing `None` through as
+  a false success (`providers/digitalocean.py`, tested in
+  `tests/unit/test_digitalocean_provider.py::test_complete_marks_null_content_as_malformed`).
+  The model remains fully configurable via `BATCHENGINE_MODEL` / the
+  `model` request field, including back to `openai-gpt-oss-20b` if a
+  caller raises `max_tokens` enough to leave room for real content after
+  reasoning.
 - **Serverless inference is prepaid; HTTP 402 means the balance hit $0.**
   This is a fatal, whole-job failure class (`fatal_billing`), not a
   per-row retryable one — see the failure taxonomy above and
@@ -145,11 +166,16 @@ assuming ~150 input / ~200 output tokens per prompt
 
 | Model ID | $/1M input | $/1M output | Est. cost, 1,000 prompts | Est. cost, 500,000 prompts |
 |---|---|---|---|---|
-| `ministral-3-14B` | $0.2 | $0.2 | ~$0.07 | ~$35.00 |
+| `mistral-3-14B` (default) | $0.2 | $0.2 | ~$0.07 | ~$35.00 |
 | `openai-gpt-oss-120b` | $0.06 | $0.39 | ~$0.09 | ~$43.50 |
-| `openai-gpt-oss-20b` (default) | $0.05 | $0.45 | ~$0.10 | ~$48.75 |
+| `openai-gpt-oss-20b` | $0.05 | $0.45 | ~$0.10 | ~$48.75 |
 | `gemma-4-31B-it` | $0.18 | $0.5 | ~$0.13 | ~$63.50 |
 | `llama-4-maverick` | $0.2 | $0.696 | ~$0.17 | ~$84.60 |
+
+Note that `openai-gpt-oss-20b`'s table position (second-cheapest on paper)
+is exactly why it's worth naming the model-selection finding above out
+loud: on-paper pricing and usable-output cost aren't always the same
+ranking.
 
 ## 8. When to stop using this service
 

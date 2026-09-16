@@ -1,0 +1,65 @@
+sequenceDiagram
+    actor Caller
+    participant API as api/routes.py
+    participant Disk as Input file (disk)
+    participant Runner as JobRunner (scheduler.py)
+    participant Ingest as core/ingest.py
+    participant Queue as asyncio.Queue(maxsize=concurrency*4)
+    participant Worker as worker.py::process_item
+    participant Bucket as TokenBucket + AIMD
+    participant Provider as InferenceProvider
+    participant Sink as core/sink.py
+    participant Store as JobStore (SQLite)
+
+    Caller->>API: POST /job {input_path, model, concurrency, ...}
+    API->>Disk: os.path.isfile / os.access / os.path.getsize (stat only -- never opens the file)
+    API->>Store: create(JobRecord, status=queued)
+    API-->>Caller: 202 {job_id, status: queued} (<50ms, independent of file size)
+    API->>Runner: asyncio.create_task(JobRunner.run())
+
+    Runner->>Store: save(status=running)
+    Runner->>Ingest: stream_items(input_path)
+    Ingest->>Disk: ijson.items() / line read, one row at a time
+    Ingest-->>Runner: PromptItem (or RowError if the row was malformed)
+    Runner->>Queue: queue.put(item)
+    note over Runner,Queue: blocks here once the queue is full - backpressure #1 (Zone 2)
+
+    Worker->>Queue: queue.get()
+    Worker->>Bucket: acquire()
+    note over Worker,Bucket: blocks here until a token refills - backpressure #2, independent of worker count
+    Bucket-->>Worker: token granted
+    Worker->>Provider: complete(prompt, model, max_tokens)
+    alt provider raises ProviderTransportError or an unexpected exception
+        Provider-->>Worker: exception (wrapped as ProviderTransportError if unexpected)
+    else provider returns
+        Provider-->>Worker: ProviderResponse(status_code, tokens, text, headers)
+    end
+
+    Worker->>Worker: classify(response, exc) -> (FailureClass, max_attempts)
+
+    alt success (200, well-formed)
+        Worker->>Sink: submit(RowResult)
+        Worker->>Worker: increments counts.succeeded and usage totals
+    else retryable (throttled or transient) and attempts/budget remain
+        Worker->>Bucket: record_throttle() and/or honor_reset_header()
+        Worker->>Worker: sleeps full_jitter_delay(attempt), then loops back to acquire()
+    else terminal (invalid_input, exhausted, or fatal_auth/fatal_billing)
+        Worker->>Sink: submit(RowError)
+        Worker->>Worker: increments counts.failed
+        opt fatal_auth or fatal_billing
+            Worker->>Runner: abort_event.set(), stops further ingestion
+        end
+    end
+
+    Sink->>Disk: append one JSONL line (fsync every 100 rows or 2s)
+    Worker->>Queue: task_done()
+
+    par independent of any single item
+        Caller->>API: GET /job/{id}/status
+        API->>Runner: read live JobRecord (same process) or Store.get() (post-restart)
+        API-->>Caller: counts, backpressure snapshot, usage, errors_by_class
+    and
+        Caller->>API: GET /job/{id}/download
+        API->>Disk: stream the JSONL file back line by line
+        API-->>Caller: NDJSON, or a manually-framed JSON array (StreamingResponse either way)
+    end

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     do_inference_key: str | None = None
     do_inference_base_url: str = "https://inference.do-ai.run/v1"
 
-    batchengine_model: str = "openai-gpt-oss-20b"
+    batchengine_model: str = "mistral-3-14B"
     batchengine_max_tokens: int = 128
     batchengine_rate_limit_rpm: int = 120
     # §6.2 default is 30s. Overridable so the test suite can shrink it --

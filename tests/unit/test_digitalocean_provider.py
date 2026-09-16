@@ -68,6 +68,32 @@ async def test_complete_marks_unparseable_200_as_malformed() -> None:
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_complete_marks_null_content_as_malformed() -> None:
+    """Reasoning models (openai-gpt-oss-20b) can return `content: null` with
+    the token budget spent on `reasoning_content` instead, especially at a
+    low max_tokens (docs/model-selection.md). This must be treated as
+    malformed, not passed through as a None "success".
+    """
+    respx.post(_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": None, "reasoning_content": "thinking..."}}],
+                "usage": {"prompt_tokens": 79, "completion_tokens": 128},
+            },
+        )
+    )
+    async with httpx.AsyncClient() as client:
+        provider = DigitalOceanProvider(
+            client, "sk-fake", "https://inference.example.com/v1", "openai-gpt-oss-20b"
+        )
+        result = await provider.complete("hi", "openai-gpt-oss-20b", 128)
+    assert result.status_code == 200
+    assert result.malformed
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_complete_raises_transport_error_on_timeout() -> None:
     respx.post(_URL).mock(side_effect=httpx.ConnectTimeout("boom"))
     async with httpx.AsyncClient() as client:
@@ -86,9 +112,18 @@ def test_cost_pricing_matches_model_catalog() -> None:
     assert provider.cost_per_1m_output() == 0.45
 
 
+def test_cost_pricing_matches_default_model() -> None:
+    provider = DigitalOceanProvider(httpx.AsyncClient(), "sk-fake", "https://x", "mistral-3-14B")
+    assert provider.cost_per_1m_input() == 0.20
+    assert provider.cost_per_1m_output() == 0.20
+
+
 def test_cost_pricing_falls_back_for_unknown_model() -> None:
+    """Falls back to the *default model's* pricing (mistral-3-14B), not an
+    arbitrary catalog entry -- see MODEL_PRICING's module comment.
+    """
     provider = DigitalOceanProvider(
         httpx.AsyncClient(), "sk-fake", "https://x", "some-unknown-model"
     )
-    assert provider.cost_per_1m_input() == 0.05
-    assert provider.cost_per_1m_output() == 0.45
+    assert provider.cost_per_1m_input() == 0.20
+    assert provider.cost_per_1m_output() == 0.20
