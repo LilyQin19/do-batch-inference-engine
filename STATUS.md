@@ -10,7 +10,7 @@ Single-screen summary. Read this first.
 | M2 | Scheduler, bounded queue, worker pool, JSONL sink, status + download | **Done** |
 | M3 | Token bucket, AIMD, full-jitter retry, full failure taxonomy, circuit breaker | **Done** |
 | M4 | Metrics + cost accounting, spend guard, memory probe, README, diagram, scaling doc | **Done** |
-| M5 | Live DO provider, Spaces checkpointing, webhook, polish, final CI | **Partial — see BLOCKED below** |
+| M5 | Live DO provider, Spaces checkpointing, webhook, polish, final CI | **Done** — live run + throttling experiment both complete |
 
 ## Tests / coverage / CI
 
@@ -76,35 +76,42 @@ didn't contradict anything and was committed as-is — see BUILD_LOG.md for
 a note that it overlaps `docs/architecture.md` and may be worth merging
 later.
 
-## Live run status
+## Live run status — both done
 
-**No live inference call was made by this session.** `DO_INFERENCE_KEY`
-was never provisioned inside it (expected — Lily performs environment
-setup per §14 of instructions.md). One narrower thing *did* happen live,
-outside this session: you ran a model-catalog check with a real key (see
-above and `docs/model-selection.md`) — that is reflected in code. The two
-bigger M5 deliverables are still outstanding:
+**`DO_INFERENCE_KEY` was provisioned and both M5 live deliverables are
+complete.**
 
-- `docs/sample_run.json` (the one full 1,000-item live run instructions.md
-  asks for) — **not produced**.
-- `docs/observed_throttling.md` (§6.8's deliberate over-rate experiment) —
-  written as a pending checklist with the exact command to run once a key
-  exists, but **not executed**.
-- The live provider (`providers/digitalocean.py`) is fully implemented and
-  unit-tested against `respx`-mocked HTTP responses (including the
-  null-content case your catalog check surfaced), but this session has
-  never made a real network call through it.
+- **The one full 1,000-item live run**: 1000/1000 succeeded, $0.018381
+  actual cost, 11 real 429s with zero configured overshoot (a genuine,
+  unscripted AIMD-hunting finding — see `docs/decisions.md`). Recorded
+  verbatim in `docs/sample_run.json`; summarized in `results.md` §2.
+- **The §6.8 over-rate throttling experiment**: run at 4× the configured
+  quota (480 RPM, 200 items), producing 52 real 429s and a genuine
+  `partial` outcome (188 succeeded, 12 `transient_exhausted` — the retry
+  budget exhausted before AIMD converged). **Found and documented a real
+  contradiction against a pre-recorded manual baseline** (observed
+  token-per-minute/token-per-day limits and the remaining-tokens-per-day
+  decrement behavior all differ from the baseline — see
+  `docs/observed_throttling.md` for the full comparison). Confirmed
+  `x-ratelimit-reset-requests` behaves as the continuous forward-refill
+  projection the docs describe.
+- `.env` reverted to `.env.example`'s defaults (`RATE_LIMIT_RPM=120`,
+  `LIVE_SAMPLE_SIZE=50`) once both experiments finished.
 
-This is the single biggest thing needing your attention: with
-`DO_INFERENCE_KEY` in `.env`, run `make demo` against `data/sample_batch.json`
-for the one full 1,000-item run, and the §6.8 experiment per
-`docs/observed_throttling.md`, then fill in both docs.
+**Incident during this work, fixed and documented**: the test fixture's
+`DO_INFERENCE_KEY` isolation had a real gap (`monkeypatch.delenv` doesn't
+block `pydantic-settings`'s dotenv fallback) that let ~11 test-suite runs
+make real live calls once `.env` existed, for ~$0.0112 not originally
+recorded in the persistent ledger. Fixed and verified (full suite rerun
+with `.env` present, zero new ledger files created anywhere). Full
+writeup: `BUILD_LOG.md`.
 
 ## Total spend
 
-**$0.00.** No live inference call was made, so no cost was incurred and
-`.spend_ledger.json` was never created. `MAX_TOTAL_SPEND_USD` ($1.00
-default per instructions.md) has not been touched.
+**$0.034948**, against a `MAX_TOTAL_SPEND_USD` cap of $1.00. Full
+breakdown in `results.md` §7 (the live run, the throttling experiment and
+its comparison run, a smoke test, and the recovered test-contamination
+amount above). Nowhere close to the cap.
 
 ## BLOCKED
 
@@ -113,22 +120,27 @@ default per instructions.md) has not been touched.
   Dockerfile is the first place to look — it's simple enough that a
   failure would likely be an environment/base-image issue rather than an
   application one.
-- **Everything under "Live run status" above** — blocked on
-  `DO_INFERENCE_KEY`, which is expected/non-blocking per §12.2.
 
 ## Top three things needing your attention
 
-1. **Provision `DO_INFERENCE_KEY` and run the one full 1,000-item live
-   job + the §6.8 throttling experiment**, then fill in
-   `docs/sample_run.json` and `docs/observed_throttling.md`. Everything
-   else in the spec that depends on a live key funnels through this one
-   step.
+1. **Review the two genuine findings from this session's live work**:
+   the AIMD-hunting-with-zero-overshoot finding (`docs/decisions.md`) and
+   the manual-baseline contradiction on token-limit headers
+   (`docs/observed_throttling.md`) — both are the kind of thing likely to
+   come up in a design review, and both are backed by real data, not
+   speculation.
 2. **Review `OPEN_QUESTIONS.md` item #1** (the server-side live-item cap)
    before your interview — it's the judgment call most likely to come up,
    since it's a field added beyond the literal §5 schema in service of the
    §12.2 safety rail.
 3. **Confirm the Docker build succeeds in CI** on first push — it was
    never run locally in this environment.
+4. **`results.md` §1 notes two real, honestly-marked test-coverage gaps**:
+   the spend guard's trip-and-abort path and the pre-flight
+   ledger-exhausted 402 refusal have no automated test (structurally
+   unreachable in the zero-credential test suite) — only live-verified
+   informally this session. Worth a look if you want that path covered
+   before the review.
 
 ## What's *not* blocked, for contrast
 

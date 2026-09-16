@@ -291,10 +291,160 @@ later rather than maintaining both long-term.
 **Gate self-check:** full suite rerun after the reconciliation — pass, 96%
 coverage maintained, ruff/format/mypy --strict clean.
 
+## Live runs, throttling experiment, doc consolidation
+
+With a real `DO_INFERENCE_KEY` provisioned:
+
+**One full 1,000-item live run** (`data/sample_batch.json`,
+`mistral-3-14B`, real 120 RPM quota, default concurrency 4): 1000/1000
+succeeded, 0 failed, 442.85s, $0.018381 actual cost vs. a ~$0.07
+generic-assumption estimate and a ~$0.022 measured-token estimate — both
+overshoot because this model's real chat-template overhead (~15 input
+tokens/item) is far below generic assumptions, and completions averaged
+~76.6 output tokens, under the 128 cap. Recorded verbatim in
+`docs/sample_run.json`. **Notable, unscripted finding:** 11 real 429s
+occurred with *zero* configured overshoot, because
+`AdaptiveController.max_rate = rate_rps × 1.5` deliberately allows the
+AIMD additive-increase phase to climb 50% past the configured quota — see
+the new `docs/decisions.md` ADR entry ("AIMD headroom probing vs. a rate
+ceiling matched exactly to the configured quota") and the matching
+`docs/design.md` §4.4 note. Decision: keep the current behavior
+(`max_rate = rate_rps` would eliminate the hunting but also the headroom
+discovery it exists for); observed-and-explained beats silently tuned away.
+
+**INCIDENT, found and fixed mid-session:** immediately after adding
+per-attempt observability logging to `worker.py` (needed for the
+throttling experiment below), a routine test run revealed that
+`tests/conftest.py`'s `monkeypatch.delenv("DO_INFERENCE_KEY")` does not
+stop `pydantic-settings` from reading a real key straight out of an
+actual `.env` file — `delenv` only clears the process environment, and
+the dotenv file is a lower-priority but still-consulted settings source
+that a *missing* var still falls through to. Once `.env` existed (for the
+live run above), this let roughly 11 test-suite job runs make real API
+calls against the live endpoint instead of the mock provider, for a
+combined ~$0.0112 that was never recorded in the persistent
+`.spend_ledger.json` (each test's ledger path is itself sandboxed to a
+throwaway `tmp_path`). Found by noticing test runs that should have taken
+milliseconds were instead taking real wall-clock seconds and producing
+response text that looked like genuine model output rather than the
+mock's synthetic strings. Fixed the fixture to
+`monkeypatch.setenv("DO_INFERENCE_KEY", "")` (an explicitly-set env var
+does outrank the dotenv file), verified with `.env` still present that a
+full suite run creates zero new ledger files anywhere, and reconciled the
+persistent ledger to include the recovered spend so the running total
+stays honest ($0.018448 → $0.029678 at that point). This is the kind of
+thing N5 ("zero network, zero credentials") exists to prevent, and it
+happened anyway the first time a real `.env` file entered the picture —
+worth remembering that `env_file=` settings sources need the same
+"explicitly set, don't delete" treatment as any other fallback-prone
+config source.
+
+**§6.8 over-rate throttling experiment**, run twice: a normal-condition
+comparison (100 items, real 120 RPM) and the throttled condition proper
+(200 items, client paced at 480 RPM / 4×, concurrency 32). Throttled run:
+188/200 succeeded, 12 `transient_exhausted` (retry budget of 40 fully
+exhausted before AIMD walked the rate down to the true limit — a real,
+observed interaction between the 20% retry budget and a large sustained
+overshoot, distinct from the healthier hunting-but-recovering pattern in
+the 1,000-item run). 52 real 429s captured with full headers via the new
+per-attempt log line. **Contradiction found against a pre-recorded manual
+baseline**, flagged explicitly per §12.5 rather than silently
+reconciled: observed `x-ratelimit-limit-tokens-per-minute` was 750000 (not
+the baseline's 500000), `x-ratelimit-limit-tokens-per-day` was 8000000
+(not 6000000), and `x-ratelimit-remaining-tokens-per-day` visibly
+decremented across calls (not "pinned" as the baseline claimed). Only
+`x-ratelimit-limit-requests: 120` matched. `x-ratelimit-reset-requests`
+confirmed as a continuous forward-refill projection (advances
+second-by-second with wall-clock time), not a fixed window, matching
+§1.3 — with the added nuance that integer-second truncation can make it
+read up to ~1s stale relative to the client's own clock. Full writeup:
+`docs/observed_throttling.md`.
+
+**Documentation consolidation.** `docs/architecture.md` and
+`docs/design.md` had grown to overlap substantially after the previous
+session's work. Per instruction, folded architecture.md's unique content
+(the per-item-dispatch-vs-chunking paragraph, the job-lifecycle "no
+separate aborted status" nuance, the one-item-lifecycle walkthrough) into
+design.md without restructuring it, then replaced architecture.md with a
+one-line pointer (kept, rather than deleted, since several other docs
+link to it by path). While folding content in, caught and fixed a real
+accuracy gap in design.md itself: §5.3 claimed restart deduplicates
+against `replay()` and only re-runs the remainder, which is false — no
+code path calls `replay()` outside its own tests, confirmed by grep.
+Flagged this back before touching design.md's prose (per the instruction
+not to restructure it); corrected in place once confirmed. Also swapped
+the README's diagram embeds from the Mermaid-rendered `flow.svg`/
+`lifecycle.svg` (CSS-class-styled, renders as solid black boxes outside
+GitHub) to the hand-authored `architecture.svg`/`job-lifecycle.svg`/
+`item-path.svg` (explicit presentation attributes, portable), added a
+"Project structure" section (annotated directory tree) to the README,
+and linked `docs/design.md` prominently at the top of the README as the
+primary design-review artifact.
+
+**`results.md` created** at the repo root: a factual evidence index
+(requirements traceability for every F/N requirement in design.md, live
+run and throttling results, the measured memory table, test suite
+summary, and the cost model) with two gaps marked honestly rather than
+glossed over: the spend guard's actual trip-and-abort path and the
+pre-flight ledger-exhausted 402 refusal have no automated test (the
+`is_live` branch is structurally unreachable in the zero-credential test
+suite), and per-model cost is only live-measured for `mistral-3-14B` —
+the other four catalog entries' costs remain generic-assumption estimates.
+
+**Gate self-check:** full suite (113 tests) green, 96% coverage, ruff/
+format/mypy --strict clean, after all of the above. `.env` reverted to
+`.env.example`'s defaults (`RATE_LIMIT_RPM=120`, `LIVE_SAMPLE_SIZE=50`)
+once both live experiments finished.
+
+## SECOND INCIDENT: a real DNS lookup in the "zero-network" test suite, causing a >1hr CI hang
+
+Checking the CI run for the previous push (per this session's final
+instruction to confirm it went green) found the `test (3.12)` matrix leg
+stuck `in_progress` on the `pytest with coverage` step for **over an
+hour**, while `test (3.11)` had passed the identical step in 2m5s.
+
+Root cause: `tests/unit/test_webhook.py::test_validate_allows_public_hostname`
+called `validate_webhook_url("https://example.com/hook")` with nothing
+mocked. `webhook.py::validate_webhook_url` calls `socket.getaddrinfo()`
+directly (not through `httpx`, so `respx` mocking elsewhere in the suite
+can't intercept it) to resolve the hostname and check it's not
+private/loopback/link-local — for `example.com` that's a **real DNS
+query** over the actual network. Two other tests
+(`test_deliver_webhook_succeeds_on_2xx`,
+`test_deliver_webhook_retries_then_gives_up_on_persistent_failure`) hit
+the same unmocked call on their way into `deliver_webhook()`, before ever
+reaching the `respx`-mocked HTTP layer. `socket.getaddrinfo` has no
+built-in timeout; on a runner with any DNS hiccup at that moment, it can
+hang far longer than any test reasonably should, and apparently did.
+
+This is the second real N5 ("zero network") violation found this
+session, after the `DO_INFERENCE_KEY`/dotenv-fallback incident above —
+both were genuine gaps in "the suite runs with zero network," not just
+theoretical risks, and both were only caught by symptoms (contaminated
+test timing/output; a stuck CI job) rather than by a static check that
+would have caught either up front. **Worth a lasting takeaway**: neither
+`monkeypatch.delenv()` nor "this test doesn't call `httpx` directly" is
+sufficient to guarantee no network I/O — a lower-priority settings
+source and a raw `socket` call are both invisible to the obvious checks.
+
+Fixed: added a `_fake_public_getaddrinfo` monkeypatch (returns a fixed
+public IP, `93.184.216.34`, without any real lookup) and applied it to
+all three affected tests. Verified: `tests/unit/test_webhook.py` passes
+in under 4 seconds; full suite rerun, 113 passed, 96% coverage
+maintained. Cancelled the stuck CI run (`gh run cancel`) rather than wait
+out its timeout, since the fix needed to ship in the next push anyway.
+
 ## Final state
 
 113 tests passing, 96% coverage (gate is 85%), ruff/ruff-format/mypy
---strict all clean, four rendered Mermaid diagrams (flow, lifecycle,
-item-path, all SVG), all four morning-review documents produced and kept
-current, default model corrected against a live catalog check. Committed
-in logical increments with real messages, per §12.4.
+--strict all clean, six rendered diagrams (flow, lifecycle, item-path as
+Mermaid/GitHub-only; architecture, job-lifecycle, item-path as
+hand-authored/portable), one full 1,000-item live run and one deliberate
+throttling experiment both recorded with real data (including one
+genuine, unscripted contradiction of a prior manual observation), a
+factual evidence index (`results.md`), and all four morning-review
+documents kept current. Two real "zero network/credentials" hygiene
+incidents found and fixed in this session (dotenv key fallback; unmocked
+DNS lookup) — both documented above rather than fixed silently. Total
+real live spend to date: $0.034948 against a $1.00 cap. Committed in
+logical increments with real messages, per §12.4.
