@@ -148,6 +148,24 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
         latency = ctx.clock() - start
 
         failure_class, max_attempts = classify(response, exc)
+        http_status = response.status_code if response is not None else None
+
+        # Per-attempt observability (§6.8): every attempt is logged with its
+        # outcome and latency, not just the item's final one -- this is what
+        # lets p50/p95 latency under normal vs. throttled conditions, and
+        # the literal rate-limit headers on a real 429, be reconstructed
+        # from logs after a live run instead of needing bespoke
+        # instrumentation each time. Never logs prompt content.
+        log.info(
+            "job.attempt",
+            job_id=ctx.job_id,
+            item_id=item.id,
+            attempt=attempt,
+            latency_s=round(latency, 4),
+            http_status=http_status,
+            failure_class=failure_class.value,
+            rate_limit_headers=(response.headers if response is not None else None),
+        )
 
         breaker_failure = failure_class in (
             FailureClass.TRANSIENT,
@@ -177,8 +195,6 @@ async def process_item(ctx: WorkerContext, item: PromptItem) -> None:
             ctx.counts.pending -= 1
             await ctx.on_spend_check()
             return
-
-        http_status = response.status_code if response is not None else None
 
         if failure_class.is_fatal:
             ctx.abort_reason.append(f"{failure_class.value} (HTTP {http_status})")

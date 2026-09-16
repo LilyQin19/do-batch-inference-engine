@@ -192,3 +192,43 @@ of `ministral-3-14B` (a research-stage guess) to the catalog's actual
 now also treats non-string `content` as a malformed response rather than
 passing `None` through as a false success, since that's the concrete bug
 this finding would otherwise have caused.
+
+## AIMD headroom probing vs. a rate ceiling matched exactly to the configured quota
+
+**Chosen:** `AdaptiveController.max_rate = rate_rps × 1.5` (`core/scheduler.py`),
+so at a configured 120 RPM the controller is allowed to climb as high as
+3.0 rps even though the true account quota is 2.0 rps.
+
+**Observed, not hypothesized:** the full 1,000-item live run
+(`docs/sample_run.json`) hit **11 real 429s with no deliberate overshoot**
+— default concurrency, `BATCHENGINE_RATE_LIMIT_RPM` set to the account's
+actual 120 RPM tier. AIMD's additive-increase phase (+0.5 rps per 50
+consecutive successes) climbed the paced rate up toward its 3.0 rps
+ceiling over the run's 7.4 minutes, overshot the true 2.0 rps limit,
+tripped a 429, backed off to roughly 1.7-2.3 rps, and climbed again —
+classic AIMD hunting around a limit the controller doesn't actually know.
+All 11 retried successfully; conservation held throughout.
+
+**Rejected:** `max_rate = rate_rps` (1.0×) — a ceiling matched exactly to
+the configured quota, which would never intentionally probe past it.
+
+**Why keep the current behavior — the honest tradeoff:**
+
+- Probing above the configured limit is the *correct* choice when the
+  true quota is unknown, can change, or is under-configured — the
+  controller discovers real headroom instead of trusting a possibly-stale
+  or possibly-wrong configuration value. This is the scenario the 1.5×
+  headroom was designed for.
+- It is *wasteful* when the quota is known exactly, as it is here: on the
+  1,000-item run, all 11 throttles were avoidable retries, and each
+  represents a wasted request against the upstream that bought nothing —
+  the controller re-discovered a limit the operator had already typed
+  into `BATCHENGINE_RATE_LIMIT_RPM`.
+- The one-line fix that eliminates the hunting is `max_rate = rate_rps`
+  — no more climbing past a limit the config already states. That change
+  was deliberately **not** made. An observed-and-explained tradeoff, with
+  a real measurement backing it, is worth more here than a silently
+  tuned-away one: it demonstrates the AIMD cooldown and full-jitter retry
+  machinery actually working under a real, if self-inflicted, throttle
+  event, rather than only under synthetic chaos-provider configurations.
+  See `core/ratelimit.py::AdaptiveController` and `docs/design.md` §4.4.

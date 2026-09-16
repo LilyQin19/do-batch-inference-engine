@@ -54,7 +54,7 @@ Deliberately out of scope, with the reasoning:
 | Distributed execution | Single process is sufficient at the 120 RPM ceiling; the quota, not CPU, is the bottleneck | Shared queue (Redis/SQS), distributed rate limiter, leader election |
 | Exactly-once delivery | Requires idempotency keys the inference API does not offer | Provider-side dedup or a two-phase commit against the result store |
 | Authentication / multi-tenancy | Single-operator tool; auth belongs at the ingress | Per-tenant quota accounting and isolated spend ledgers |
-| Job prioritization / fairness | One job at a time is the observed usage | Priority queue and weighted scheduling across jobs |
+| Job prioritization / fairness | One job at a time is the observed usage — each `JobRunner` builds its own token bucket sized off the full account-wide RPM setting, so two jobs running at once each assume the full quota to themselves and will jointly exceed it | Priority queue and weighted scheduling across jobs |
 
 ---
 
@@ -89,7 +89,7 @@ reach a terminal state.
 
 ## 3. High-level architecture
 
-![architecture flow](diagrams/flow.svg)
+![architecture](diagrams/architecture.svg)
 
 One asyncio task per job walks four zones. The API layer has no knowledge of
 execution; the scheduler has no knowledge of HTTP.
@@ -129,17 +129,36 @@ JobRunner.run
   → on drain: compute final status, assert conservation, persist, webhook
 ```
 
-### 3.3 Item lifecycle
+### 3.3 Job lifecycle
 
-![item path](diagrams/item_path.svg)
-
-### 3.4 Job lifecycle
-
-![job lifecycle](diagrams/lifecycle.svg)
+![job lifecycle](diagrams/job-lifecycle.svg)
 
 Terminal status is derived, not assigned: `cancelled` if cancellation was
 requested, `failed` if a fatal class aborted the job or nothing succeeded,
 `succeeded` if nothing failed, otherwise `partial`.
+
+There is no separate "aborted" status. `fatal_auth`, `fatal_billing`, and
+the spend guard all set the same internal `abort_event`; every path
+through it resolves to the ordinary `failed` status above, and the
+distinguishing reason lives only in `JobRecord.abort_reason` — a caller
+polling `status` alone cannot tell an abort apart from "every item
+happened to fail on its own." Durability while a job runs is periodic,
+not per-item: the record is persisted on creation, at the queued->running
+transition, every 25 ingested items, and once at the terminal transition
+(§4.8) — the live `GET /job/{id}/status` read path is unaffected (it
+reads the same in-memory object the scheduler mutates), so this only
+matters for what a *restarted* process would see.
+
+### 3.4 Item lifecycle
+
+![item path](diagrams/item-path.svg)
+
+Traces a single prompt from `POST /job` through stat validation, the 202
+response, streaming ingest, the bounded queue, token acquisition,
+classification, retry-or-emit, the sink, and back out through
+`status`/`download`. The two explicit backpressure points (queue-full,
+bucket-empty) are the same two mechanisms in §3.2's control flow, shown
+here at the granularity of one item instead of the whole pipeline.
 
 ---
 
@@ -210,6 +229,25 @@ job never reaches terminal status.
 asserts `counts.conserved()`. G3 is checked in production code, not only in
 tests.
 
+**Dispatch model.** Every item flows through the one shared queue above,
+consumed by the fixed worker pool below — the input is never partitioned
+into N static chunks with one chunk assigned to each worker. This is a
+deliberate deviation from the project statement's literal wording
+("partition the 1,000 prompt records into concurrent execution chunks"),
+not an oversight: static chunking suffers straggler imbalance, where a
+chunk that happens to contain the slow prompts holds the job open long
+after every other worker has drained its own chunk and gone idle. A
+shared queue is self-balancing — a worker that finishes fast immediately
+pulls the next available item regardless of which "chunk" it would have
+belonged to. The honest tradeoff is that chunking would have bought
+simpler chunk-level checkpointing and retry granularity ("chunk 3 of 10
+is done" is a natural coarse-grained resumption point); this design
+pushes that down to per-item granularity instead (the JSONL sink's
+replay, and per-item retry in the worker pool), which fits G3's per-row
+failure semantics better but gives up the coarse-grained resumption unit.
+See `docs/decisions.md`'s "Per-item dispatch through a shared queue vs.
+static chunk partitioning" entry for the full writeup.
+
 ### 4.4 Rate Limiter — `core/ratelimit.py`
 
 **Responsibility.** Pace requests per second against the account quota, and
@@ -239,6 +277,18 @@ finishing in 100 ms produce 20 req/s and breach a 2 req/s quota immediately
 regardless of semaphore size. Concurrency and rate are different quantities —
 related by Little's Law, `L = λ × W` — and need different mechanisms. The queue
 bounds `L` for memory; the bucket bounds `λ` for quota.
+
+**`max_rate` is set above the configured quota, deliberately.** `AdaptiveController.max_rate
+= rate_rps × 1.5`, so the controller is allowed to probe 50% past the
+configured RPM before AIMD's decrease kicks in. Observed live on the
+1,000-item run (`docs/sample_run.json`): 11 real 429s with *no* configured
+overshoot at all, purely from AIMD's additive-increase phase climbing past
+the true limit and getting throttled back down — classic hunting. This is
+a known, accepted tradeoff (probing discovers real headroom when the true
+quota is unknown or changes; it's wasted requests when the quota is known
+exactly, as it was here) rather than an oversight — see `docs/decisions.md`'s
+"AIMD headroom probing vs. a rate ceiling matched exactly to the configured
+quota" entry for the full argument on both sides.
 
 ### 4.5 Worker Pool — `core/worker.py`
 
@@ -424,18 +474,29 @@ on requests that were never slow.
 
 ### 5.3 Delivery semantics
 
-**At-least-once, bounded by the retry budget.**
+**At-least-once while the process is alive; not even consistently
+at-least-once across a restart.**
 
-A completed item is written to the JSONL sink before its counter increments, so
-a crash cannot lose an already-recorded result — at worst it loses up to one
-fsync window (100 rows or 2 seconds).
+While the process is alive, every ingested item is guaranteed to reach a
+terminal outcome exactly once (§4.5's exception containment is what makes
+this structural). A completed item is written to the JSONL sink before
+its counter increments, so a crash cannot lose an already-recorded result
+— at worst it loses up to one fsync window (100 rows or 2 seconds).
 
-Items in flight when the process dies are neither recorded nor retried
-automatically; on restart, `replay()` reconstructs which IDs already completed,
-and re-submitting the job re-runs only the remainder. Re-running an item that
-had in fact completed upstream would pay for that inference twice. Exactly-once
-would require an idempotency key the inference API does not expose, which is why
-it appears in the non-goals.
+Items in flight when the process dies (already dequeued, mid-retry-backoff,
+or sitting in the bounded queue) are simply lost from memory — there is no
+persisted record that they were dispatched. **`replay()` exists and can
+rebuild counts and the set of already-seen item ids from an existing JSONL
+file, but no code path in this build calls it to resume a job's ingestion**
+— there is no "resubmit job X, skip what's already in its result file"
+endpoint or startup hook wired up today. A restarted job, if resubmitted,
+re-reads the input from the start and re-dispatches every item, including
+ones that already succeeded and were already billed — a crash-and-resubmit
+against a live provider re-pays for every item that had already completed.
+Exactly-once would require durably recording "item X is in flight" *before*
+dispatch (not just recording completions), reconciling that set against the
+result file on restart, and an idempotency key the inference API does not
+expose — which is why it appears in the non-goals.
 
 ### 5.4 Observability
 

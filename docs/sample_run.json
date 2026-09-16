@@ -1,0 +1,58 @@
+{
+  "description": "The one full 1,000-item live run against DigitalOcean Serverless Inference required by instructions.md. Recorded verbatim from GET /job/{id}/status at job completion.",
+  "job_id": "01M2NN9BJSSE0DK9JVNYZDBJXE",
+  "model": "mistral-3-14B",
+  "input_path": "data/sample_batch.json",
+  "max_tokens": 128,
+  "configured_rate_limit_rpm": 120,
+  "concurrency": "auto (default_concurrency = ceil(rate_rps * 2.0) = 4)",
+  "submitted_at": "2026-09-16T17:47:28Z",
+  "completed_at": "2026-09-16T17:54:51Z",
+  "status": "succeeded",
+  "counts": {
+    "ingested": 1000,
+    "succeeded": 1000,
+    "failed": 0,
+    "in_flight": 0,
+    "pending": 0
+  },
+  "timing": {
+    "started_at": "2026-09-16T17:47:28Z",
+    "elapsed_s": 442.85,
+    "eta_s": null,
+    "throughput_rps": 2.258
+  },
+  "backpressure": {
+    "current_rate_limit_rps": 1.6875,
+    "configured_max_rps": 3.0,
+    "throttle_events_429": 11,
+    "retries_issued": 11,
+    "retry_budget_remaining": 189,
+    "circuit_state": "closed",
+    "observed_mean_latency_s": 0.8086,
+    "littles_law_optimal_concurrency": 2
+  },
+  "usage": {
+    "input_tokens": 15337,
+    "output_tokens": 76567,
+    "avg_input_tokens_per_item": 15.337,
+    "avg_output_tokens_per_item": 76.567,
+    "estimated_cost_usd": 0.018381
+  },
+  "errors_by_class": {},
+  "abort_reason": null,
+  "cost_comparison": {
+    "readme_generic_estimate_usd": 0.07,
+    "readme_generic_estimate_basis": "README/docs/scaling.md cost table's generic ~150 input / ~200 output tokens-per-prompt assumption, applied uniformly across every catalog model for comparability",
+    "model_selection_measured_estimate_usd": 0.022,
+    "model_selection_measured_estimate_basis": "docs/model-selection.md's own live measurement against a single test prompt: 15 prompt tokens + 94 completion tokens for mistral-3-14B, projected to 1,000 items",
+    "actual_usd": 0.018381,
+    "why_lower_than_readme_generic": "mistral-3-14B's real chat-template overhead is far below the README's generic ~150-token assumption (observed ~15.3 avg prompt tokens/item here vs. the assumption's 150).",
+    "why_lower_than_model_selection_estimate": "this 1,000-item run averaged ~76.6 output tokens/item vs. the single-sample 94 completion tokens docs/model-selection.md measured -- both well under the 128 max_tokens cap (no truncation), but averaging many prompts pulled the mean down from that one sample."
+  },
+  "notable_observation": {
+    "summary": "11 real 429s occurred with no deliberate overshoot -- default concurrency (4), configured at the true 120 RPM account quota.",
+    "cause": "AdaptiveController.max_rate = rate_rps * 1.5 = 3.0 rps against a true quota of 2.0 rps. The AIMD additive-increase phase (+0.5 rps per 50 consecutive successes) climbs the paced rate up toward that 3.0 rps ceiling over a long-enough run, overshoots the real 2.0 rps limit, gets throttled back down to roughly 1.7-2.3 rps, and climbs again -- classic AIMD hunting around an unknown-to-the-controller true limit, observed live, not engineered for this run.",
+    "outcome": "All 11 throttled requests retried successfully; conservation held (succeeded + failed == ingested throughout). See docs/decisions.md's \"AIMD headroom probing vs. a rate ceiling matched exactly to the configured quota\" entry for the tradeoff this represents."
+  }
+}
