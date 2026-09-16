@@ -20,10 +20,12 @@ Single-screen summary. Read this first.
 - `mypy --strict src/` — clean, 0 errors across 30 source files.
 - `.github/workflows/ci.yml` runs all of the above on a 3.11/3.12 matrix
   plus `docker build .`, with zero secrets required anywhere in the
-  pipeline. **Not verified locally** — Docker Desktop's engine was not
-  running in this environment (see BLOCKED). The Dockerfile is a
-  straightforward `python:3.12-slim` + `pip install .` build with no
-  unusual steps; risk of a CI-only failure is low but unconfirmed.
+  pipeline. **Confirmed green on GitHub Actions** (run
+  [35134802423](https://github.com/LilyQin19/do-batch-inference-engine/actions/runs/35134802423)):
+  `test (3.11)` 1m50s, `docker` 29s, `test (3.12)` 2m0s — all passed. This
+  is also the fix-verification run: the *previous* push's `test (3.12)`
+  leg had hung for over an hour on a real (unmocked) DNS lookup in
+  `test_webhook.py` (see below); this run's 2m0s confirms the fix.
 
 ## Post-review fixes (read this section if you're re-checking after a review)
 
@@ -115,11 +117,8 @@ amount above). Nowhere close to the cap.
 
 ## BLOCKED
 
-- **Docker build not locally verified** (Docker Desktop engine unavailable
-  in this environment). CI will build it on push; if it fails there, the
-  Dockerfile is the first place to look — it's simple enough that a
-  failure would likely be an environment/base-image issue rather than an
-  application one.
+Nothing currently. (Docker was never verified locally in this
+environment, but is now confirmed green on CI — see above.)
 
 ## Top three things needing your attention
 
@@ -133,9 +132,7 @@ amount above). Nowhere close to the cap.
    before your interview — it's the judgment call most likely to come up,
    since it's a field added beyond the literal §5 schema in service of the
    §12.2 safety rail.
-3. **Confirm the Docker build succeeds in CI** on first push — it was
-   never run locally in this environment.
-4. **`results.md` §1 notes two real, honestly-marked test-coverage gaps**:
+3. **`results.md` §1 notes two real, honestly-marked test-coverage gaps**:
    the spend guard's trip-and-abort path and the pre-flight
    ledger-exhausted 402 refusal have no automated test (structurally
    unreachable in the zero-credential test suite) — only live-verified
