@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="600" viewBox="0 0 1240 600">
+<defs>
+<marker id="a" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#5A6672"/></marker>
+<marker id="ar" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#B26B00"/></marker>
+<marker id="aw" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 z" fill="#B0341A"/></marker>
+</defs>
+<rect x="0" y="0" width="1240" height="600" fill="#FFFFFF"/>
+<text x="40" y="38" font-family="Segoe UI,Arial" font-size="22" font-weight="700" fill="#1F3A5F">Item Path — one prompt, end to end</text>
+<text x="40" y="62" font-family="Segoe UI,Arial" font-size="14" fill="#5A6672">Returning from the worker always means the item reached exactly one terminal state.</text>
+
+<rect x="40" y="96" width="196" height="66" rx="8" fill="#1F3A5F"/>
+<text x="58" y="122" font-family="Segoe UI,Arial" font-size="15" font-weight="700" fill="#FFFFFF">1 · POST /job</text>
+<text x="58" y="142" font-family="Segoe UI,Arial" font-size="11.5" fill="#C8D6E8">stat-only · 202 in &lt;50ms</text>
+<line x1="236" y1="129" x2="272" y2="129" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+
+<rect x="274" y="96" width="196" height="66" rx="8" fill="#FFFFFF" stroke="#1F6FEB" stroke-width="1.5"/>
+<text x="292" y="122" font-family="Segoe UI,Arial" font-size="15" font-weight="600" fill="#12233A">2 · Stream ingest</text>
+<text x="292" y="142" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">ijson → PromptItem</text>
+<line x1="470" y1="129" x2="506" y2="129" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+
+<rect x="508" y="96" width="196" height="66" rx="8" fill="#FFF4E0" stroke="#B26B00" stroke-width="1.5"/>
+<text x="526" y="122" font-family="Segoe UI,Arial" font-size="15" font-weight="600" fill="#12233A">3 · Bounded queue</text>
+<text x="526" y="142" font-family="Segoe UI,Arial" font-size="11.5" fill="#B26B00">backpressure 1 — put blocks</text>
+<line x1="704" y1="129" x2="740" y2="129" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+
+<rect x="742" y="96" width="196" height="66" rx="8" fill="#FFF4E0" stroke="#B26B00" stroke-width="1.5"/>
+<text x="760" y="122" font-family="Segoe UI,Arial" font-size="15" font-weight="600" fill="#12233A">4 · Acquire token</text>
+<text x="760" y="142" font-family="Segoe UI,Arial" font-size="11.5" fill="#B26B00">backpressure 2 — paces λ</text>
+<line x1="938" y1="129" x2="974" y2="129" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+
+<rect x="976" y="96" width="224" height="66" rx="8" fill="#F2ECFC" stroke="#7A4FD1" stroke-width="1.5"/>
+<text x="994" y="122" font-family="Segoe UI,Arial" font-size="15" font-weight="600" fill="#12233A">5 · Provider call</text>
+<text x="994" y="142" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">shared pooled httpx client</text>
+
+<line x1="1088" y1="162" x2="1088" y2="202" stroke="#5A6672" stroke-width="2"/>
+<line x1="1088" y1="202" x2="622" y2="202" stroke="#5A6672" stroke-width="2"/>
+<line x1="622" y1="202" x2="622" y2="234" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+
+<rect x="486" y="236" width="272" height="66" rx="8" fill="#F2ECFC" stroke="#7A4FD1" stroke-width="1.8"/>
+<text x="504" y="262" font-family="Segoe UI,Arial" font-size="15" font-weight="700" fill="#12233A">6 · classify()</text>
+<text x="504" y="282" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">exactly one class, one action</text>
+
+<path d="M486,269 L300,269 L300,352" fill="none" stroke="#B26B00" stroke-width="2" marker-end="url(#ar)"/>
+<rect x="150" y="354" width="300" height="76" rx="8" fill="#FFF4E0" stroke="#B26B00" stroke-width="1.5"/>
+<text x="168" y="378" font-family="Segoe UI,Arial" font-size="14" font-weight="600" fill="#12233A">throttled / transient</text>
+<text x="168" y="398" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">full jitter backoff · retry budget</text>
+<text x="168" y="416" font-family="Segoe UI,Arial" font-size="11.5" fill="#B26B00">429 also drives AIMD decrease</text>
+<path d="M150,392 L96,392 L96,129 L272,129" fill="none" stroke="#B26B00" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#ar)"/>
+<text x="106" y="272" font-family="Segoe UI,Arial" font-size="11.5" font-style="italic" fill="#B26B00">retry same item</text>
+
+<line x1="622" y1="302" x2="622" y2="352" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+<rect x="486" y="354" width="272" height="76" rx="8" fill="#E7F6EC" stroke="#1E8E4A" stroke-width="1.5"/>
+<text x="504" y="378" font-family="Segoe UI,Arial" font-size="14" font-weight="600" fill="#12233A">success</text>
+<text x="504" y="398" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">RowResult · usage · latency</text>
+<text x="504" y="416" font-family="Segoe UI,Arial" font-size="11.5" fill="#1E8E4A">counters incremented after write</text>
+
+<path d="M758,269 L860,269 L860,352" fill="none" stroke="#B0341A" stroke-width="2" marker-end="url(#aw)"/>
+<rect x="794" y="354" width="180" height="76" rx="8" fill="#FCEDEA" stroke="#B0341A" stroke-width="1.5"/>
+<text x="812" y="378" font-family="Segoe UI,Arial" font-size="14" font-weight="600" fill="#12233A">invalid_input</text>
+<text x="812" y="398" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">terminal RowError</text>
+<text x="812" y="416" font-family="Segoe UI,Arial" font-size="11.5" fill="#B0341A">no retry</text>
+
+<rect x="1000" y="354" width="200" height="76" rx="8" fill="#FCEDEA" stroke="#B0341A" stroke-width="1.8"/>
+<text x="1018" y="378" font-family="Segoe UI,Arial" font-size="14" font-weight="700" fill="#B0341A">fatal_auth / billing</text>
+<text x="1018" y="398" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">abort_event.set()</text>
+<text x="1018" y="416" font-family="Segoe UI,Arial" font-size="11.5" fill="#B0341A">whole job stops, 1 request</text>
+<path d="M758,258 L1090,258 L1090,352" fill="none" stroke="#B0341A" stroke-width="2" marker-end="url(#aw)"/>
+
+<line x1="622" y1="430" x2="622" y2="466" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+<line x1="884" y1="430" x2="884" y2="450" stroke="#5A6672" stroke-width="2"/>
+<line x1="884" y1="450" x2="700" y2="450" stroke="#5A6672" stroke-width="2"/>
+<line x1="700" y1="450" x2="700" y2="466" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+
+<rect x="440" y="468" width="360" height="62" rx="8" fill="#E7F6EC" stroke="#1E8E4A" stroke-width="1.5"/>
+<text x="458" y="492" font-family="Segoe UI,Arial" font-size="15" font-weight="600" fill="#12233A">7 · Result sink — single writer</text>
+<text x="458" y="513" font-family="Segoe UI,Arial" font-size="11.5" fill="#5A6672">append-only JSONL · fsync every 100 rows / 2s</text>
+
+<line x1="440" y1="499" x2="392" y2="499" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+<rect x="150" y="468" width="240" height="62" rx="8" fill="#1F3A5F"/>
+<text x="168" y="492" font-family="Segoe UI,Arial" font-size="14" font-weight="600" fill="#FFFFFF">GET /job/{id}/download</text>
+<text x="168" y="513" font-family="Segoe UI,Arial" font-size="11.5" fill="#C8D6E8">streamed, never materialized</text>
+
+<line x1="800" y1="499" x2="848" y2="499" stroke="#5A6672" stroke-width="2" marker-end="url(#a)"/>
+<rect x="850" y="468" width="240" height="62" rx="8" fill="#1F3A5F"/>
+<text x="868" y="492" font-family="Segoe UI,Arial" font-size="14" font-weight="600" fill="#FFFFFF">GET /job/{id}/status</text>
+<text x="868" y="513" font-family="Segoe UI,Arial" font-size="11.5" fill="#C8D6E8">counts · cost · backpressure</text>
+
+<rect x="40" y="552" width="1160" height="34" rx="7" fill="#F4F6F8" stroke="#D4DAE0" stroke-width="1"/>
+<text x="60" y="574" font-family="Segoe UI,Arial" font-size="12.5" fill="#12233A">Every branch out of classify() ends in the sink or aborts the job. Unexpected exceptions are converted to transient failures, so no path exits without a terminal outcome.</text>
+</svg>

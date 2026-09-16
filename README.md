@@ -1,5 +1,11 @@
 # Batch Inference Engine
 
+**For a design review, start with [`docs/design.md`](docs/design.md)** —
+the canonical architecture and design document (specification, design
+goals, full component-by-component design, cross-cutting concerns,
+scale thresholds). This README is the quickstart and a summary; `design.md`
+is the primary artifact.
+
 ## 1. What this is
 
 A REST API service that fans a batch of prompts out to DigitalOcean
@@ -40,26 +46,106 @@ uvicorn batchengine.main:app --port 8000
 With a key present, `POST /job` automatically uses the live DigitalOcean
 provider instead of the mock — and automatically caps ingestion at
 `LIVE_SAMPLE_SIZE` (50) unless raised, and always at `MAX_LIVE_ITEMS` (1000)
-as a hard ceiling; see "Product findings" and `docs/decisions.md`. **No live
-run was executed during this build** — no key was provisioned; see STATUS.md.
+as a hard ceiling; see "Product findings" and `docs/decisions.md`. **One
+full 1,000-item live run has been recorded** — see
+[`docs/sample_run.json`](docs/sample_run.json) and results.md; the §6.8
+over-rate throttling experiment is recorded in
+[`docs/observed_throttling.md`](docs/observed_throttling.md).
 
 ## 3. Architecture
 
-![flow diagram](docs/diagrams/flow.svg)
+![architecture diagram](docs/diagrams/architecture.svg)
+
+> The Mermaid-rendered diagrams under `docs/diagrams/*.mmd` render
+> correctly on GitHub but not in most other viewers (LibreOffice, Word,
+> generic SVG rasterizers) — their styling lives in a `<style>` block with
+> CSS class selectors that those renderers ignore, turning every shape
+> into a solid black box. `architecture.svg`, `job-lifecycle.svg`, and
+> `item-path.svg` are hand-authored with explicit presentation attributes
+> instead, so they're the portable versions; the Mermaid sources (and
+> their GitHub-rendered `.svg` output) remain as the editable source of
+> truth.
 
 Four zones — ingestion, backpressure throttling, scatter pool, gather
-collection — walked in detail in [`docs/architecture.md`](docs/architecture.md).
-In short: `ijson` streams the input row by row into a bounded
-`asyncio.Queue`, a TokenBucket+AIMD controller paces request rate against
-the account quota independent of worker count, N workers classify and
-retry against the §6.2 failure taxonomy, and a single writer appends
-results to JSONL while keeping only counters in memory.
-`docs/architecture.md` also includes a job-lifecycle state diagram, an
+collection — walked in detail in [`docs/design.md`](docs/design.md), the
+canonical architecture document. In short: `ijson` streams the input row
+by row into a bounded `asyncio.Queue`, a TokenBucket+AIMD controller paces
+request rate against the account quota independent of worker count, N
+workers classify and retry against the §6.2 failure taxonomy, and a
+single writer appends results to JSONL while keeping only counters in
+memory. `docs/design.md` also includes a job-lifecycle state diagram, an
 end-to-end single-item sequence diagram, an explicit "Delivery semantics"
 section (at-least-once, not exactly-once — read this before assuming what
 happens on a crash), and a "Non-goals" section.
 
-## 4. Design decisions
+## 4. Project structure
+
+```
+do-batch-inference-engine/
+├── src/batchengine/
+│   ├── main.py                    App factory + lifespan (shared httpx client, SQLite store)
+│   ├── app_state.py                Process-wide state container (split out to avoid an import cycle)
+│   ├── config.py                   pydantic-settings: every env var, one place
+│   ├── api/
+│   │   ├── routes.py                POST /job, GET status/download, cancel, /healthz, /metrics
+│   │   └── schemas.py               Pydantic request/response models for the §5 contract
+│   ├── core/
+│   │   ├── models.py                Dependency-free domain types: PromptItem, RowResult/RowError,
+│   │   │                            FailureClass taxonomy, JobRecord
+│   │   ├── ingest.py                Streaming JSON/JSONL reader (ijson); never json.load()
+│   │   ├── scheduler.py             JobRunner: wires ingest → queue → limiter → workers → sink
+│   │   ├── worker.py                Per-item acquire → call → classify → retry-or-emit loop
+│   │   ├── ratelimit.py             TokenBucket (mechanism) + AIMD AdaptiveController (policy)
+│   │   ├── retry.py                 Failure classification table, full jitter, retry budget,
+│   │   │                            circuit breaker
+│   │   ├── sink.py                  Single-writer append-only JSONL, batched fsync, replay()
+│   │   └── spend_ledger.py          Cross-run committed spend cap (the outer guard; see §6.7)
+│   ├── providers/
+│   │   ├── base.py                  InferenceProvider Protocol + ProviderResponse/TransportError
+│   │   ├── digitalocean.py          Live provider; MODEL_PRICING; null-content malformed handling
+│   │   └── mock.py                  Seeded chaos provider — the entire test suite's foundation
+│   ├── store/
+│   │   ├── base.py                  JobStore Protocol
+│   │   ├── memory.py                In-memory store (used by tests and scripts/memory_probe.py)
+│   │   └── sqlite.py                SQLite-backed store (used by the running app)
+│   ├── observability/
+│   │   ├── logging.py                structlog JSON configuration
+│   │   └── metrics.py                Hand-rolled Prometheus text exposition
+│   └── extensions/
+│       ├── webhook.py                HMAC-signed completion webhook, SSRF-guarded
+│       └── spaces.py                 DigitalOcean Spaces multipart checkpointing (feature-flagged)
+├── tests/
+│   ├── conftest.py                  Shared fixtures: app_client_factory, write_batch, wait_for_terminal
+│   ├── unit/                        One file per src module, fakes/respx only — no network
+│   ├── integration/                 Full app via httpx.ASGITransport; test_conservation.py is
+│   │                                the crown jewel (§0's invariant, under 10 chaos configs)
+│   └── property/                    hypothesis: conservation and rate-limit bounds under
+│                                     randomized inputs, not just fixed cases
+├── scripts/
+│   ├── generate_batch.py            Builds an N-item sample batch file
+│   ├── memory_probe.py              Measures RSS at N=1K/10K/100K/500K against the mock provider
+│   └── cost_table.py                 Computes the README's cost table from MODEL_PRICING
+├── docs/
+│   ├── design.md                    Canonical architecture & design document (start here)
+│   ├── architecture.md              Superseded — one-line pointer to design.md
+│   ├── decisions.md                 ADR log: every choice, its rejected alternative, and why
+│   ├── scaling.md                   Measured memory table + throughput/Little's-Law analysis
+│   ├── model-selection.md           Why the spec's model is unavailable; live catalog findings
+│   ├── observed_throttling.md       §6.8: the deliberate over-rate live experiment
+│   ├── sample_run.json              The one full 1,000-item live run, recorded verbatim
+│   ├── memory_probe_results.json    Raw output backing docs/scaling.md's measured table
+│   └── diagrams/                    Mermaid sources (.mmd) + rendered .svg; hand-authored
+│                                     *.svg (architecture, job-lifecycle, item-path) are the
+│                                     portable versions — see §3 above
+├── results.md                       Evidence index: every claim, with what proves it
+├── BUILD_LOG.md, STATUS.md,         The morning-review packet (instructions.md §12.3)
+│   OPEN_QUESTIONS.md
+├── instructions.md                  The original build spec, committed verbatim (shows process)
+├── .github/workflows/ci.yml         ruff, mypy --strict, pytest+coverage, docker build — no secrets
+└── Dockerfile, docker-compose.yml, Makefile
+```
+
+## 5. Design decisions
 
 Full writeups (each naming the rejected alternative) are in
 [`docs/decisions.md`](docs/decisions.md). Summary:
@@ -86,7 +172,7 @@ Full writeups (each naming the rejected alternative) are in
 - **JSONL sink, not an in-memory results list** — completed work is durable
   and streamable without ever holding the full result set twice.
 
-## 5. Failure taxonomy
+## 6. Failure taxonomy
 
 | Condition | Class | Action |
 |---|---|---|
@@ -110,7 +196,7 @@ Implemented as `FailureClass` in `core/models.py`; classified by
 `tests/property/test_conservation_property.py` (hypothesis-generated chaos
 mixes).
 
-## 6. Scaling and memory
+## 7. Scaling and memory
 
 Full analysis in [`docs/scaling.md`](docs/scaling.md). Headlines:
 
@@ -125,7 +211,7 @@ Full analysis in [`docs/scaling.md`](docs/scaling.md). Headlines:
   live and exposed as `littles_law_optimal_concurrency` in
   `GET /job/{id}/status`.
 
-## 7. Product findings
+## 8. Product findings
 
 Verified against DigitalOcean's live documentation, control panel, and
 (2026-09-16) the live model-access-key endpoint itself — see
@@ -177,7 +263,7 @@ is exactly why it's worth naming the model-selection finding above out
 loud: on-paper pricing and usable-output cost aren't always the same
 ranking.
 
-## 8. When to stop using this service
+## 9. When to stop using this service
 
 See the full decision table in [`docs/scaling.md`](docs/scaling.md). In
 short: this engine is right for up to low tens-of-thousands of items on
@@ -187,7 +273,7 @@ the shared RPM ceiling), or a quota tier increase are each the correct next
 step depending on latency sensitivity and sustained volume — not a more
 clever scheduler.
 
-## 9. Testing
+## 10. Testing
 
 ```bash
 make test          # pytest, 85% coverage gate, zero network / zero credentials
@@ -215,7 +301,7 @@ but excluded from CI by construction: `DO_INFERENCE_KEY` is never set in
 the test environment, so `POST /job` always selects the mock provider (see
 `api/routes.py`). No test, fixture, or CI step ever sets that variable.
 
-## 10. What I'd do with more time
+## 11. What I'd do with more time
 
 - Wire DigitalOcean Spaces checkpointing (`extensions/spaces.py`) into a
   real bucket and add a `moto`-backed integration test — implemented but
